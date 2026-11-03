@@ -41,22 +41,54 @@ export GATEWAY_MQTT_BROKER_URL='tcp://localhost:1883'
 - TCP `:9100`
 - Kafka bootstrap `localhost:9092`，topic `instr.event.v1`，key=`deviceId`，acks=all + idempotence
 
-## 启动
+## 获取代码
 
 ```bash
-cd instrument-gateway
-mvn -q spring-boot:run
-# 或
-mvn -q -DskipTests package && java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar
+git clone https://github.com/pengpai01/instrument-gateway.git E:\grok_bot\instrument-gateway
+cd /d E:\grok_bot\instrument-gateway
 ```
 
-带 local profile：
+## 启动（Windows 本机）
 
-```bash
-cp src/main/resources/application-local.example.yml src/main/resources/application-local.yml
-# 编辑 api-key / mqtt
+先设 JDK 17（按你本机安装路径调整）：
+
+PowerShell:
+
+```powershell
+$env:JAVA_HOME='E:\jdk-17'
+$env:Path = "$env:JAVA_HOME\bin;$env:Path"
+$env:GATEWAY_API_KEY='change-me-local-only'
+# 可选 MQTT（不设则 MQTT 降级，HTTP/TCP 仍可用）
+# $env:GATEWAY_MQTT_BROKER_URL='tcp://localhost:1883'
+cd E:\grok_bot\instrument-gateway
+mvn -q spring-boot:run
+```
+
+CMD:
+
+```bat
+set JAVA_HOME=E:\jdk-17
+set PATH=%JAVA_HOME%\bin;%PATH%
+set GATEWAY_API_KEY=change-me-local-only
+cd /d E:\grok_bot\instrument-gateway
+mvn -q spring-boot:run
+```
+
+或打包后运行：
+
+```bat
+mvn -q -DskipTests package
+java -jar target\instrument-gateway-0.1.0-SNAPSHOT.jar
+```
+
+带 local profile（复制 example → gitignore 的 local 文件后编辑假密钥/MQTT）：
+
+```bat
+copy src\main\resources\application-local.example.yml src\main\resources\application-local.yml
 mvn -q spring-boot:run -Dspring-boot.run.profiles=local
 ```
+
+Linux / macOS / box 同样可用 `export JAVA_HOME=...` 与 `export GATEWAY_API_KEY=...` 后 `mvn -q spring-boot:run`。
 
 ## HTTP 样例（三类）
 
@@ -95,7 +127,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/api/v1/i
 - JSON 内含 `token`（与全局 Key 同值）；验完**剥离**，不进 Kafka
 - 坏 JSON / 校验失败 → 丢弃 + 日志
 
-> 厂商帧格式不同时，实现/替换 `TcpFrameDecoder` 即可，不必改 ingest 语义。
+> **默认长度前缀帧可替换**：厂商帧格式不同时实现/替换 `TcpFrameDecoder`（或换 pipeline factory）即可，不必改 ingest 语义。勿把当前帧格式当成唯一协议。
 
 用 Python 发一帧 DETECT：
 
@@ -174,12 +206,10 @@ com.danah.instrument.gateway
   config/           *Properties
 ```
 
-## 从 box 拷到 Windows
+## 仓库说明
 
-本仓库在 Linux box 上路径：`/workspace/instrument-gateway`。拷到 `E:\grok_bot\instrument-gateway` 可用：
-
-- Cursor / VS Code Remote 下载目录
-- `scp -r ... /workspace/instrument-gateway user@windows-host:...`（按你环境）
-- 或打包：`tar czf instrument-gateway.tgz -C /workspace instrument-gateway` 后传文件
-
-到 Windows 后确保本机 **JDK 17 + Maven**，按上文 `mvn spring-boot:run` 即可（Kafka 地址按本机改）。
+- 远程：`https://github.com/pengpai01/instrument-gateway.git`
+- **主开发**：box `/workspace/instrument-gateway`（改完 push）
+- **本机查看**：`git clone` / `git pull` 到 `E:\grok_bot\instrument-gateway`；`JAVA_HOME=E:\jdk-17`
+- 勿动本机 `E:\grok_bot\bak`
+- Kafka / MQTT 均可配置；**Docker Compose 仅可选**
