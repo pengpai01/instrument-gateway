@@ -1,6 +1,9 @@
-# Optional local dependencies — NOT required if you already have Kafka / MQTT.
-# Usage: docker compose up -d
-# Then point spring.kafka.bootstrap-servers and gateway.mqtt.broker-url accordingly.
+# Optional local dependencies — Kafka required for ingest; MQTT optional.
+# Box: export DOCKER_HOST=tcp://127.0.0.1:2375
+#      export PATH="/home/box/tools/docker/bin:$PATH"
+#      docker compose up -d
+#
+# Remote Docker daemon cannot bind-mount /workspace files — mosquitto uses inline conf.
 
 services:
   zookeeper:
@@ -21,18 +24,21 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
 
-  # Optional MQTT broker for local MQTT ingest tests
   mosquitto:
     image: eclipse-mosquitto:2
     ports:
       - "1883:1883"
-    volumes:
-      - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '%s\n' 'listener 1883' 'allow_anonymous true' 'persistence false' > /tmp/mosquitto.conf
+        exec mosquitto -c /tmp/mosquitto.conf
