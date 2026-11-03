@@ -1,0 +1,16 @@
+# Copy to application-local.yml (gitignored) and fill in local values.
+# NEVER commit real production secrets.
+
+gateway:
+  api-key: change-me-local-only
+  mqtt:
+    broker-url: tcp://localhost:1883
+    # username:
+    # password:
+
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+
+# Activate with: --spring.profiles.active=local
+# Or: SPRING_PROFILES_ACTIVE=local

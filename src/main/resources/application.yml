@@ -1,0 +1,59 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: instrument-gateway
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      acks: all
+      properties:
+        enable.idempotence: true
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    # Admin client used for topic auto-create + actuator health
+    admin:
+      fail-fast: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+  health:
+    defaults:
+      enabled: true
+
+gateway:
+  # Prefer env GATEWAY_API_KEY. Do not commit real production secrets.
+  api-key: ${GATEWAY_API_KEY:}
+  kafka:
+    topic: instr.event.v1
+    auto-create-topic: true
+    partitions: 1
+    replication-factor: 1
+  tcp:
+    enabled: true
+    host: 0.0.0.0
+    port: 9100
+    max-frame-bytes: 1024
+  mqtt:
+    # Empty = MQTT disabled; process still starts. Set via local profile / env.
+    broker-url: ${GATEWAY_MQTT_BROKER_URL:}
+    username: ${GATEWAY_MQTT_USERNAME:}
+    password: ${GATEWAY_MQTT_PASSWORD:}
+    topic-filter: instr/+/up
+    qos: 1
+    client-id-prefix: gw-
+
+logging:
+  level:
+    com.danah.instrument.gateway: INFO
+    org.springframework.kafka: WARN
