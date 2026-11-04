@@ -11,7 +11,7 @@
 |------|------|
 | **JDK 17+** | 必须 |
 | **Maven 3.9+** | 必须 |
-| **Kafka** | 必须（默认 `localhost:9092`，topic `instr.event.v1`） |
+| **Kafka** | 必须。topic `instr.event.v1`。box / 默认 `localhost:9092`；笔记本 profile `laptop` → `192.168.11.114:9092` |
 | **MQTT broker** | **可选**。不配 `gateway.mqtt.broker-url` 时进程仍可启动，HTTP/TCP 可用 |
 
 ### 可选：Docker Compose
@@ -39,7 +39,22 @@ export GATEWAY_MQTT_BROKER_URL='tcp://localhost:1883'
 
 - HTTP `:8080` — `POST /api/v1/ingest`，`GET /actuator/health`
 - TCP `:9100`
-- Kafka bootstrap `localhost:9092`，topic `instr.event.v1`，key=`deviceId`，acks=all + idempotence
+- Kafka topic `instr.event.v1`，key=`deviceId`，acks=all + idempotence
+
+### Kafka bootstrap：box 与笔记本（二选一）
+
+不要同时打开 `local` 和 `laptop`。两个 profile 都写死了 bootstrap，后写的会盖住先写的。未加 profile 时走 `application.yml` 默认，可用环境变量 `KAFKA_BOOTSTRAP_SERVERS` 覆盖；**profile 里的地址不再读这个变量**。
+
+| 场景 | 一条命令 | bootstrap |
+|------|----------|-----------|
+| **box 联调**（本仓库 `docker compose`） | `java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=local` | `localhost:9092` |
+| **box 默认**（不复制 local yml 也行） | `java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar` | `localhost:9092`（或 `KAFKA_BOOTSTRAP_SERVERS`） |
+| **Windows 笔记本** → 内网 Kafka | `java -jar target\instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=laptop` | `192.168.11.114:9092` |
+
+- box：`src/main/resources/application-local.example.yml` → 复制成 gitignore 的 `application-local.yml`，bootstrap 保持 `localhost:9092`
+- 笔记本：直接用已提交的 `src/main/resources/application-laptop.yml`（打进 jar）。API Key 仍是占位 `change-me-local-only`，或环境变量 `GATEWAY_API_KEY`。该 profile **不配置 MQTT**
+
+`mvn` 等价写法：`-Dspring-boot.run.profiles=local` 或 `-Dspring-boot.run.profiles=laptop`。
 
 ## 获取代码
 
@@ -74,21 +89,27 @@ cd /d E:\grok_bot\instrument-gateway
 mvn -q spring-boot:run
 ```
 
-或打包后运行：
+或打包后运行。连笔记本内网 Kafka（`192.168.11.114:9092`）加 profile `laptop`：
 
 ```bat
 mvn -q -DskipTests package
-java -jar target\instrument-gateway-0.1.0-SNAPSHOT.jar
+java -jar target\instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=laptop
 ```
 
-带 local profile（复制 example → gitignore 的 local 文件后编辑假密钥/MQTT）：
+PowerShell 用 `mvn` 直跑同一 profile：
+
+```powershell
+mvn -q spring-boot:run "-Dspring-boot.run.profiles=laptop"
+```
+
+box 上不要用 `laptop`。本机若只想连 docker compose 的 `localhost:9092`，用 `local`（或什么 profile 都不加）：
 
 ```bat
 copy src\main\resources\application-local.example.yml src\main\resources\application-local.yml
 mvn -q spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
-Linux / macOS / box 同样可用 `export JAVA_HOME=...` 与 `export GATEWAY_API_KEY=...` 后 `mvn -q spring-boot:run`。
+Linux / macOS / box：`export JAVA_HOME=...` 与 `export GATEWAY_API_KEY=...` 后 `mvn -q spring-boot:run`（默认 `localhost:9092`）。联调 profile：`--spring.profiles.active=local`。
 
 ## HTTP 样例（三类）
 
@@ -170,18 +191,22 @@ mosquitto_pub -h localhost -t 'instr/dev-mqtt-1/up' -q 1 -m "{\"type\":\"ALARM\"
 
 ## 消费 Kafka 验证
 
+box / docker compose（`localhost:9092`）：
+
 ```bash
-# 若使用 docker compose 中的 Kafka 镜像：
 docker compose exec kafka kafka-console-consumer \
   --bootstrap-server localhost:9092 \
   --topic instr.event.v1 \
   --from-beginning --property print.key=true
 ```
 
-或本机已装 CLI：
+或本机已装 CLI。笔记本 profile `laptop` 时把 bootstrap 换成 `192.168.11.114:9092`（topic 仍是 `instr.event.v1`）：
 
 ```bash
 kafka-console-consumer --bootstrap-server localhost:9092 \
+  --topic instr.event.v1 --from-beginning --property print.key=true
+
+kafka-console-consumer --bootstrap-server 192.168.11.114:9092 \
   --topic instr.event.v1 --from-beginning --property print.key=true
 ```
 

@@ -1,0 +1,20 @@
+# Windows / laptop dev: user's intranet Kafka.
+# Box compose联调 stays on profile `local` (or no profile) → localhost:9092.
+# Do not activate `local` and `laptop` together; each sets its own bootstrap.
+#
+# MQTT is intentionally absent. Broker URL stays empty (adapter disabled)
+# until the user broker is ready. Do not put real secrets in this file.
+# Override the placeholder with env GATEWAY_API_KEY.
+
+gateway:
+  api-key: ${GATEWAY_API_KEY:change-me-local-only}
+  kafka:
+    topic: instr.event.v1
+
+spring:
+  kafka:
+    bootstrap-servers: 192.168.11.114:9092
+
+# Activate:
+#   java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=laptop
+#   mvn -q spring-boot:run -Dspring-boot.run.profiles=laptop

@@ -1,5 +1,7 @@
 # Copy to application-local.yml (gitignored) and fill in local values.
 # NEVER commit real production secrets.
+# Box / docker compose Kafka. Do not point this file at 192.168.11.114.
+# Laptop intranet Kafka is the separate `laptop` profile (application-laptop.yml).
 
 gateway:
   api-key: change-me-local-only
