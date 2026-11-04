@@ -7,6 +7,8 @@ target/
 .vscode/
 *.log
 .DS_Store
+# Gitignored real local override (copy from application-local.example.yml).
+# application-laptop.yml is committed on purpose: intranet bootstrap only, placeholder API key.
 application-local.yml
 *.env
 .env

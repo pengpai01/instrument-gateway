@@ -8,6 +8,8 @@ spring:
     serialization:
       write-dates-as-timestamps: false
   kafka:
+    # Box / no profile: localhost:9092 (docker compose). Optional env override.
+    # Laptop intranet broker: profile `laptop` → 192.168.11.114:9092 (application-laptop.yml).
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
       acks: all

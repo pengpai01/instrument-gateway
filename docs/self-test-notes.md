@@ -33,13 +33,32 @@ Compose Kafka listeners (required for host `localhost:9092`):
 ```bash
 cd /workspace/instrument-gateway
 mvn -q -DskipTests package
-# MQTT disabled (empty broker-url) — proves process still starts:
+# Box compose path — bootstrap localhost:9092. MQTT disabled unless broker-url is set:
 java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=local
-# Optional MQTT smoke against compose mosquitto:
+# Optional MQTT smoke against compose mosquitto (not the user broker):
 # GATEWAY_MQTT_BROKER_URL=tcp://localhost:1883 java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=local
 ```
 
 Windows clone note: `JAVA_HOME=E:\jdk-17` then `mvn` (see README).
+
+## Kafka bootstrap switch (box vs laptop)
+
+Do **not** activate `local` and `laptop` together. Profile files set a literal bootstrap, so they do not read `KAFKA_BOOTSTRAP_SERVERS`. With no profile, `application.yml` stays `localhost:9092` unless that env var is set. MQTT / C-gate is unchanged: `laptop` does not set `gateway.mqtt.*` (user broker still pending).
+
+| Path | Activate | Bootstrap | Topic / API key |
+|------|----------|-----------|-----------------|
+| Box compose | `--spring.profiles.active=local` (or no profile) | `localhost:9092` | `instr.event.v1` / `GATEWAY_API_KEY` or `change-me-local-only` |
+| Windows laptop → intranet Kafka | `--spring.profiles.active=laptop` | `192.168.11.114:9092` | same topic; placeholder key in `application-laptop.yml` |
+
+```bat
+java -jar target\instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=laptop
+```
+
+```bash
+java -jar target/instrument-gateway-0.1.0-SNAPSHOT.jar --spring.profiles.active=local
+```
+
+Health on the laptop path should report `bootstrapServers: ["192.168.11.114:9092"]`. The 2026-11-03 box run below used compose `localhost:9092` only; this box did not dial `192.168.11.114`.
 
 ## Definition of done
 
@@ -121,5 +140,6 @@ TCP: 2-byte big-endian length + UTF-8 JSON (include `"token":"change-me-local-on
 
 ## Open
 
-- User MQTT broker URL: **blocked / tomorrow**.
+- User MQTT broker URL: **blocked / tomorrow**. Profile `laptop` does not set MQTT.
+- Laptop intranet Kafka `192.168.11.114:9092` is config-only here (`application-laptop.yml`). Box default remains `localhost:9092`.
 - Remote GitHub already: `https://github.com/pengpai01/instrument-gateway.git`.
