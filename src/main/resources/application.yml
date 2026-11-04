@@ -36,6 +36,11 @@ management:
 gateway:
   # Prefer env GATEWAY_API_KEY. Do not commit real production secrets.
   api-key: ${GATEWAY_API_KEY:}
+  # Optional key -> clientId map. One key per instrument gives every client a stable sourceId
+  # even when the firmware cannot report a deviceId. Keys must not contain a dot.
+  #   clients:
+  #     krd-lab-key-01: krd-lab-01
+  clients: {}
   kafka:
     topic: instr.event.v1
     auto-create-topic: true
@@ -46,6 +51,15 @@ gateway:
     host: 0.0.0.0
     port: 9100
     max-frame-bytes: 1024
+    # Records larger than one frame arrive as msgId/seq/total envelopes and are merged here.
+    # max-bytes applies to the assembled record, not to a single frame.
+    assembly:
+      enabled: true
+      max-bytes: 65536
+      # 128 fragments x ~700 raw bytes/frame covers the 64KB record limit
+      max-fragments: 128
+      timeout-ms: 10000
+      max-pending-per-channel: 8
   mqtt:
     # Empty = MQTT disabled; process still starts. Set via local profile / env.
     broker-url: ${GATEWAY_MQTT_BROKER_URL:}

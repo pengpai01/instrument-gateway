@@ -18,6 +18,8 @@ import java.io.IOException;
 public class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     public static final String HEADER_API_KEY = "X-Api-Key";
+    /** Request attribute carrying the clientId bound to the presented key, if any. */
+    public static final String ATTR_CLIENT_ID = "gateway.clientId";
     private static final String INGEST_PATH = "/api/v1/ingest";
 
     private final ApiKeyAuthenticator authenticator;
@@ -41,6 +43,10 @@ public class ApiKeyAuthFilter extends OncePerRequestFilter {
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
             response.getWriter().write("{\"error\":\"unauthorized\",\"message\":\"missing or invalid API key\"}");
             return;
+        }
+        String clientId = authenticator.clientIdOf(key);
+        if (clientId != null) {
+            request.setAttribute(ATTR_CLIENT_ID, clientId);
         }
         filterChain.doFilter(request, response);
     }

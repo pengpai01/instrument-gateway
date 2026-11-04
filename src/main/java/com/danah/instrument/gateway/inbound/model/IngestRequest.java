@@ -9,6 +9,12 @@ import java.util.Map;
  */
 public class IngestRequest {
 
+    /**
+     * Optional ingress identity. Only needed when the client cannot supply {@link #deviceId}
+     * and the transport carries no usable hint of its own (plain HTTP/TCP).
+     */
+    private String sourceId;
+    /** Optional business identifier; many analysers cannot report one, so it must stay optional. */
     private String deviceId;
     private String type;
     private String occurredAt;
@@ -18,6 +24,14 @@ public class IngestRequest {
     private Map<String, Object> ext;
     /** Auth token for TCP/MQTT; never written to Kafka. */
     private String token;
+
+    public String getSourceId() {
+        return sourceId;
+    }
+
+    public void setSourceId(String sourceId) {
+        this.sourceId = sourceId;
+    }
 
     public String getDeviceId() {
         return deviceId;

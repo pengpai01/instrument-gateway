@@ -4,6 +4,7 @@ import com.danah.instrument.gateway.auth.ApiKeyAuthenticator;
 import com.danah.instrument.gateway.config.MqttProperties;
 import com.danah.instrument.gateway.inbound.IngestException;
 import com.danah.instrument.gateway.inbound.IngestService;
+import com.danah.instrument.gateway.inbound.IngressContext;
 import com.danah.instrument.gateway.inbound.model.IngestRequest;
 import com.danah.instrument.gateway.inbound.model.Protocol;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -102,7 +103,7 @@ public class MqttInboundConfig implements ApplicationRunner {
 
     void handleMessage(String topic, MqttMessage message) {
         String json = new String(message.getPayload(), StandardCharsets.UTF_8);
-        String deviceFromTopic = extractDeviceId(topic);
+        String topicSegment = extractSourceSegment(topic);
 
         IngestRequest request;
         try {
@@ -122,7 +123,11 @@ public class MqttInboundConfig implements ApplicationRunner {
         }
 
         try {
-            ingestService.ingest(request, Protocol.MQTT, deviceFromTopic);
+            // the topic segment names the ingress channel, so it outranks a body deviceId;
+            // neither is required, and the body deviceId is still carried through as-is
+            IngressContext ingress = new IngressContext(
+                    null, authenticator.clientIdOf(token), topicSegment, null);
+            ingestService.ingest(request, Protocol.MQTT, ingress);
         } catch (IngestException e) {
             log.warn("MQTT ingest rejected topic={}: {} — discarded", topic, e.getMessage());
         } catch (Exception e) {
@@ -131,9 +136,10 @@ public class MqttInboundConfig implements ApplicationRunner {
     }
 
     /**
-     * Topic pattern instr/+/up — second segment is deviceId.
+     * Topic pattern instr/+/up — the second segment labels the source. It is a routing fact
+     * owned by the broker, which makes it a better identity than anything in the payload.
      */
-    static String extractDeviceId(String topic) {
+    static String extractSourceSegment(String topic) {
         if (topic == null) {
             return null;
         }

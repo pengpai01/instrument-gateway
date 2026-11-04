@@ -132,6 +132,10 @@ curl -s -H 'Content-Type: application/json' -H 'X-Api-Key: change-me-local-only'
 
 TCP: 2-byte big-endian length + UTF-8 JSON (include `"token":"change-me-local-only"`).
 
+Event types: `DETECT` / `POWER` / `ALARM` / `REPORT` / `SAMPLE`. `REPORT.payload.result` is mandatory and must be an array of objects (row fields are left free-form because analysers differ). The real 77-row GM report measures 12,086 bytes ≈ 17 fragments and is kept as `src/test/resources/tcp/sample-report-gm.json` for regression. `SAMPLE.payload.content` is mandatory and must be an object; the real single-sample result measures 521 bytes (635 with the gateway envelope), fits one frame and needs no fragmentation — kept as `src/test/resources/tcp/sample-result-screen.json`.
+
+Fragment envelopes (`msgId`/`seq`/`total`/`data` = the slice as escaped JSON text, cut on UTF-8 character boundaries) are merged per connection before parsing; **all fragments of one `msgId` must stay on the same connection**. The envelope has a fixed budget — a 16-char `msgId` and at most 3 digits for `seq`/`total` cost 60 bytes, leaving 961 B of data in a 1021 B payload — which is what lets a client size its buffer instead of estimating. `seq == total` marks the last fragment, and completeness is `received == total`, so out-of-order arrival is fine. Bounds live under `gateway.tcp.assembly.*` (64KB / 128 fragments / 10s / 8 pending per connection). Frames without those three fields keep the single-frame behaviour.
+
 ## Code changes made during self-test
 
 1. `docker-compose.yml` — added `KAFKA_LISTENERS` + `KAFKA_INTER_BROKER_LISTENER_NAME`; mosquitto without host bind-mount (remote Docker API).

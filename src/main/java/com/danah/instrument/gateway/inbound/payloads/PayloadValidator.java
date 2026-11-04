@@ -8,7 +8,7 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Validates DETECT / POWER / ALARM payload shapes. Field names must not change.
+ * Validates DETECT / POWER / ALARM / REPORT / SAMPLE payload shapes. Field names must not change.
  */
 @Component
 public class PayloadValidator {
@@ -24,6 +24,8 @@ public class PayloadValidator {
             case DETECT -> validateDetect(payload);
             case POWER -> validatePower(payload);
             case ALARM -> validateAlarm(payload);
+            case REPORT -> validateReport(payload);
+            case SAMPLE -> validateSample(payload);
             default -> throw new IllegalArgumentException("unknown type: " + type);
         }
     }
@@ -58,6 +60,40 @@ public class PayloadValidator {
         // cleared? optional bool
         if (p.has("cleared") && !p.get("cleared").isNull() && !p.get("cleared").isBoolean()) {
             throw new IllegalArgumentException("ALARM.payload.cleared must be boolean when present");
+        }
+    }
+
+    /**
+     * Instrument report: the header stays free-form, but the rows are the reason this event
+     * exists: {@code result} must be present, must be an array, and every row must be an object.
+     * Row fields are not enforced because analysers differ.
+     */
+    private void validateReport(JsonNode p) {
+        JsonNode result = p.get("result");
+        if (result == null || result.isNull()) {
+            throw new IllegalArgumentException("REPORT.payload.result is required");
+        }
+        if (!result.isArray()) {
+            throw new IllegalArgumentException("REPORT.payload.result must be an array");
+        }
+        for (JsonNode row : result) {
+            if (!row.isObject()) {
+                throw new IllegalArgumentException("REPORT.payload.result items must be objects");
+            }
+        }
+    }
+
+    /**
+     * Single-sample analyser result (one measurement per message): the header stays at the top
+     * level and the measurement values sit in {@code content}, which must be a JSON object.
+     */
+    private void validateSample(JsonNode p) {
+        JsonNode content = p.get("content");
+        if (content == null || content.isNull()) {
+            throw new IllegalArgumentException("SAMPLE.payload.content is required");
+        }
+        if (!content.isObject()) {
+            throw new IllegalArgumentException("SAMPLE.payload.content must be an object");
         }
     }
 

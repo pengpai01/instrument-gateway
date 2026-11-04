@@ -8,6 +8,12 @@ import java.util.Map;
 public class InboundEvent {
 
     private String eventId;
+    /**
+     * Ingress identity, always present. Kafka key = this value, so every event from one source
+     * stays on one partition and keeps its order.
+     */
+    private String sourceId;
+    /** Business identifier; null when the instrument cannot report one. */
     private String deviceId;
     private EventType type;
     private Instant occurredAt;
@@ -24,6 +30,14 @@ public class InboundEvent {
 
     public void setEventId(String eventId) {
         this.eventId = eventId;
+    }
+
+    public String getSourceId() {
+        return sourceId;
+    }
+
+    public void setSourceId(String sourceId) {
+        this.sourceId = sourceId;
     }
 
     public String getDeviceId() {

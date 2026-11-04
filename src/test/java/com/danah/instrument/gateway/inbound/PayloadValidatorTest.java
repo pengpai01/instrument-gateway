@@ -3,6 +3,7 @@ package com.danah.instrument.gateway.inbound;
 import com.danah.instrument.gateway.inbound.model.EventType;
 import com.danah.instrument.gateway.inbound.payloads.PayloadValidator;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -64,5 +65,104 @@ class PayloadValidatorTest {
     @Test
     void nullPayloadRejected() {
         assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.DETECT, null));
+    }
+
+    @Test
+    void reportOk() {
+        ObjectNode p = obj().put("serialsId", "100C200017").put("hospital", "福州艾迪康医学检验");
+        ArrayNode rows = p.putArray("result");
+        rows.addObject().put("num", "1").put("projectName", "GM试验").put("concentration", "0.050");
+        rows.addObject().put("num", "113").put("projectName", "GM试验").put("concentration", "2.540");
+
+        assertDoesNotThrow(() -> validator.validate(EventType.REPORT, p));
+    }
+
+    @Test
+    void reportWithEmptyResultAccepted() {
+        ObjectNode p = obj();
+        p.putArray("result");
+
+        assertDoesNotThrow(() -> validator.validate(EventType.REPORT, p));
+    }
+
+    @Test
+    void reportMissingResultRejected() {
+        ObjectNode p = obj().put("serialsId", "100C200017");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.REPORT, p));
+    }
+
+    @Test
+    void reportNonArrayResultRejected() {
+        ObjectNode p = obj().put("result", "77 rows");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.REPORT, p));
+    }
+
+    @Test
+    void reportNonObjectRowRejected() {
+        ObjectNode p = obj();
+        p.putArray("result").add("not-an-object");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.REPORT, p));
+    }
+
+    @Test
+    void sampleOk() {
+        ObjectNode p = obj().put("orgCode", "dnk").put("iccid", "89860625790032599518");
+        p.putObject("content")
+                .put("deviceId", "屏幕测试6")
+                .put("concentration", "-1.000")
+                .put("sampleType", "其他")
+                .put("checkTime", "2026-11-04 11:21:29");
+
+        assertDoesNotThrow(() -> validator.validate(EventType.SAMPLE, p));
+    }
+
+    @Test
+    void sampleWithEmptyContentAccepted() {
+        ObjectNode p = obj();
+        p.putObject("content");
+
+        assertDoesNotThrow(() -> validator.validate(EventType.SAMPLE, p));
+    }
+
+    @Test
+    void sampleMissingContentRejected() {
+        ObjectNode p = obj().put("orgCode", "dnk").put("iccid", "89860625790032599518");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.SAMPLE, p));
+    }
+
+    @Test
+    void sampleNonObjectContentRejected() {
+        ObjectNode p = obj().put("content", "screen test");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.SAMPLE, p));
+    }
+
+    @Test
+    void sampleNullContentRejected() {
+        ObjectNode p = obj().putNull("content");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.SAMPLE, p));
+    }
+
+    @Test
+    void sampleArrayContentRejected() {
+        ObjectNode p = obj();
+        p.putArray("content").addObject().put("deviceId", "屏幕测试6");
+
+        assertThrows(IllegalArgumentException.class, () -> validator.validate(EventType.SAMPLE, p));
+    }
+
+    @Test
+    void sampleKeepsStringResultInsideContent() {
+        // the single-sample shape carries content.result as a plain value ("--" when the
+        // analyser produced nothing); the REPORT array rule must not leak into SAMPLE
+        ObjectNode p = obj();
+        p.putObject("content").put("result", "--").put("concentration", "-1.000");
+
+        assertDoesNotThrow(() -> validator.validate(EventType.SAMPLE, p));
     }
 }

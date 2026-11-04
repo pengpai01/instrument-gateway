@@ -5,15 +5,15 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-class MqttTopicDeviceIdTest {
+class MqttTopicSourceTest {
 
     @Test
     void extractsSecondSegment() {
-        assertEquals("dev-1", MqttInboundConfig.extractDeviceId("instr/dev-1/up"));
+        assertEquals("dev-1", MqttInboundConfig.extractSourceSegment("instr/dev-1/up"));
     }
 
     @Test
     void shortTopic() {
-        assertNull(MqttInboundConfig.extractDeviceId("instr"));
+        assertNull(MqttInboundConfig.extractSourceSegment("instr"));
     }
 }

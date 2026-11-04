@@ -5,7 +5,11 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 public enum EventType {
     DETECT,
     POWER,
-    ALARM;
+    ALARM,
+    /** A lab instrument report: one header plus a rows array (e.g. GM test results). */
+    REPORT,
+    /** A single-sample analyser result: header at top level, measurement values in {@code content}. */
+    SAMPLE;
 
     @JsonCreator
     public static EventType from(String value) {
