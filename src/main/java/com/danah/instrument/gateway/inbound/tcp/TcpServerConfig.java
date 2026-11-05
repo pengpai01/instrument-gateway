@@ -12,6 +12,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.TooLongFrameException;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.timeout.ReadTimeoutHandler;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,7 @@ public class TcpServerConfig implements ApplicationRunner {
     private final TcpProperties properties;
     private final TcpFrameDecoder frameDecoder;
     private final TcpInboundHandler inboundHandler;
+    private final ConnectionAuthHandler connectionAuthHandler;
 
     private EventLoopGroup bossGroup;
     private EventLoopGroup workerGroup;
@@ -36,10 +38,12 @@ public class TcpServerConfig implements ApplicationRunner {
 
     public TcpServerConfig(TcpProperties properties,
                            TcpFrameDecoder frameDecoder,
-                           TcpInboundHandler inboundHandler) {
+                           TcpInboundHandler inboundHandler,
+                           ConnectionAuthHandler connectionAuthHandler) {
         this.properties = properties;
         this.frameDecoder = frameDecoder;
         this.inboundHandler = inboundHandler;
+        this.connectionAuthHandler = connectionAuthHandler;
     }
 
     @Override
@@ -54,16 +58,28 @@ public class TcpServerConfig implements ApplicationRunner {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
+                        TcpProperties.Auth auth = properties.getAuth();
+                        // The opening frame must be the AUTH handshake: time-box it, then remove the
+                        // timeout once the connection is authenticated so it may idle afterwards.
+                        ch.pipeline().addLast("handshakeTimeout",
+                                new ReadTimeoutHandler(handshakeTimeoutSeconds(auth)));
                         ch.pipeline()
                                 .addLast("frameDecoder", frameDecoder.newDecoder(properties.getMaxFrameBytes()))
                                 .addLast("oversizedGuard", new OversizedFrameLogger())
+                                .addLast("connectionAuth", connectionAuthHandler)
                                 .addLast("handler", inboundHandler);
                     }
                 });
 
         serverChannel = bootstrap.bind(properties.getHost(), properties.getPort()).sync().channel();
-        log.info("TCP ingest listening on {}:{} frameDecoder={} maxFrameBytes={}",
-                properties.getHost(), properties.getPort(), frameDecoder.name(), properties.getMaxFrameBytes());
+        log.info("TCP ingest listening on {}:{} frameDecoder={} maxFrameBytes={} handshakeTimeoutMs={}",
+                properties.getHost(), properties.getPort(), frameDecoder.name(),
+                properties.getMaxFrameBytes(), properties.getAuth().getHandshakeTimeoutMs());
+    }
+
+    /** ReadTimeoutHandler takes whole seconds and rejects 0, so sub-second settings round up to 1. */
+    private static int handshakeTimeoutSeconds(TcpProperties.Auth auth) {
+        return Math.max(1, (int) Math.ceil(auth.getHandshakeTimeoutMs() / 1000.0));
     }
 
     @PreDestroy

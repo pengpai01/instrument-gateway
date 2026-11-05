@@ -6,6 +6,7 @@ import com.danah.instrument.gateway.inbound.IngestService;
 import com.danah.instrument.gateway.inbound.IngressContext;
 import com.danah.instrument.gateway.inbound.model.IngestRequest;
 import com.danah.instrument.gateway.inbound.model.Protocol;
+import com.danah.instrument.gateway.inbound.tcp.ConnectionAuthHandler;
 import com.danah.instrument.gateway.inbound.tcp.LengthPrefixTcpFrameDecoder;
 import com.danah.instrument.gateway.inbound.tcp.TcpFragmentAssembler;
 import com.danah.instrument.gateway.inbound.tcp.TcpInboundHandler;
@@ -41,14 +42,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Real decoder + real assembler, ingest mocked: proves one fragmented record produces exactly
- * one IngestRequest (and that legacy single-frame records still work).
+ * Real decoder + real handshake, ingest mocked: proves one fragmented record produces exactly one
+ * IngestRequest (and that a record that fits one frame still works).
  */
 class TcpInboundHandlerTest {
 
     private static final String TOKEN = "test-key";
-    private static final String RECORD = "{\"deviceId\":\"dev-1\",\"type\":\"POWER\",\"token\":\"" + TOKEN
-            + "\",\"payload\":{\"state\":\"ON\"}}";
+    private static final String RECORD = "{\"deviceId\":\"dev-1\",\"type\":\"POWER\","
+            + "\"payload\":{\"state\":\"ON\"}}";
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -64,17 +65,27 @@ class TcpInboundHandlerTest {
         when(authenticator.matches(TOKEN)).thenReturn(true);
 
         properties = new TcpProperties();
-        TcpInboundHandler handler = new TcpInboundHandler(ingestService, authenticator,
-                mapper, properties, new TcpFragmentAssembler(properties));
-
-        channel = new EmbeddedChannel(
-                new LengthPrefixTcpFrameDecoder().newDecoder(properties.getMaxFrameBytes()),
-                handler);
+        channel = newChannel();
+        authenticate();
     }
 
     @AfterEach
     void tearDown() {
         channel.finishAndReleaseAll();
+    }
+
+    /** A connection without AUTH never reaches ingest, no matter how valid the record is. */
+    @Test
+    void framesBeforeHandshakeNeverReachIngest() {
+        EmbeddedChannel unauthenticated = newChannel();
+        try {
+            fragment(RECORD.getBytes(StandardCharsets.UTF_8), "msg-auth", 16)
+                    .forEach(payload -> send(unauthenticated, payload));
+
+            verify(ingestService, never()).ingest(any(), any(), any());
+        } finally {
+            unauthenticated.finishAndReleaseAll();
+        }
     }
 
     @Test
@@ -120,7 +131,7 @@ class TcpInboundHandlerTest {
     }
 
     @Test
-    void legacySingleFrameRecordStillWorks() {
+    void singleFrameRecordStillWorks() {
         send(RECORD.getBytes(StandardCharsets.UTF_8));
 
         ArgumentCaptor<IngestRequest> captor = ArgumentCaptor.forClass(IngestRequest.class);
@@ -130,9 +141,8 @@ class TcpInboundHandlerTest {
 
     @Test
     void recordWithoutDeviceIdStillReachesIngest() {
-        // the wire contract no longer mandates deviceId: a bare POWER frame must survive
-        String record = "{\"type\":\"POWER\",\"token\":\"" + TOKEN
-                + "\",\"payload\":{\"state\":\"ON\"}}";
+        // the wire contract does not mandate deviceId: a bare POWER frame must survive
+        String record = "{\"type\":\"POWER\",\"payload\":{\"state\":\"ON\"}}";
 
         send(record.getBytes(StandardCharsets.UTF_8));
 
@@ -165,21 +175,29 @@ class TcpInboundHandlerTest {
         verify(ingestService, never()).ingest(any(), any(), any());
     }
 
-    @Test
-    void unknownTokenFragmentNeverReachesIngest() {
-        String record = RECORD.replace(TOKEN, "wrong-key");
-        List<byte[]> frames = fragment(record.getBytes(StandardCharsets.UTF_8), "msg-5", 16);
-
-        frames.forEach(this::send);
-
-        verify(ingestService, never()).ingest(any(), any(), any());
+    private void send(byte[] payload) {
+        send(channel, payload);
     }
 
-    private void send(byte[] payload) {
+    private static void send(EmbeddedChannel target, byte[] payload) {
         ByteBuf frame = Unpooled.buffer();
         frame.writeShort(payload.length);
         frame.writeBytes(payload);
-        channel.writeInbound(frame);
+        target.writeInbound(frame);
+    }
+
+    private EmbeddedChannel newChannel() {
+        TcpInboundHandler handler = new TcpInboundHandler(ingestService, mapper, properties,
+                new TcpFragmentAssembler(properties));
+        return new EmbeddedChannel(
+                new LengthPrefixTcpFrameDecoder().newDecoder(properties.getMaxFrameBytes()),
+                new ConnectionAuthHandler(authenticator, mapper, properties),
+                handler);
+    }
+
+    private void authenticate() {
+        String auth = "{\"type\":\"AUTH\",\"token\":\"" + TOKEN + "\"}";
+        send(auth.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -240,8 +258,8 @@ class TcpInboundHandlerTest {
     void largeRecordIsReassembledAndIngestedOnce() {
         int items = 12000;
         StringBuilder record = new StringBuilder(40000);
-        record.append("{\"deviceId\":\"dev-big\",\"type\":\"DETECT\",\"token\":\"").append(TOKEN)
-                .append("\",\"occurredAt\":\"2026-11-04T10:00:00Z\",")
+        record.append("{\"deviceId\":\"dev-big\",\"type\":\"DETECT\",")
+                .append("\"occurredAt\":\"2026-11-04T10:00:00Z\",")
                 .append("\"payload\":{\"itemCode\":\"SPEC\",\"value\":[");
         for (int i = 0; i < items; i++) {
             if (i > 0) {
@@ -267,7 +285,6 @@ class TcpInboundHandlerTest {
         IngestRequest request = captor.getValue();
         assertEquals("dev-big", request.getDeviceId());
         assertEquals("DETECT", request.getType());
-        assertNull(request.getToken(), "token must be stripped before ingest");
         assertEquals(items, request.getPayload().get("value").size());
         assertEquals(0, request.getPayload().get("value").get(0).asInt());
         assertEquals((items - 1) % 100, request.getPayload().get("value").get(items - 1).asInt());
@@ -283,8 +300,8 @@ class TcpInboundHandlerTest {
         }
 
         // real body is 12086 bytes; the gateway envelope adds a few hundred more
-        String record = "{\"deviceId\":\"100C200017\",\"type\":\"REPORT\",\"token\":\"" + TOKEN
-                + "\",\"occurredAt\":\"2026-11-03T23:27:34Z\",\"siteId\":\"krd\",\"payload\":"
+        String record = "{\"deviceId\":\"100C200017\",\"type\":\"REPORT\","
+                + "\"occurredAt\":\"2026-11-03T23:27:34Z\",\"siteId\":\"krd\",\"payload\":"
                 + report + "}";
 
         List<byte[]> frames = fragment(record.getBytes(StandardCharsets.UTF_8), "msg-gm-report", 700);
@@ -352,8 +369,8 @@ class TcpInboundHandlerTest {
             body = new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
         }
 
-        return ("{\"deviceId\":\"屏幕测试6\",\"type\":\"SAMPLE\",\"token\":\"" + TOKEN
-                + "\",\"occurredAt\":\"2026-11-04T11:21:29Z\",\"siteId\":\"dnk\",\"payload\":"
+        return ("{\"deviceId\":\"屏幕测试6\",\"type\":\"SAMPLE\","
+                + "\"occurredAt\":\"2026-11-04T11:21:29Z\",\"siteId\":\"dnk\",\"payload\":"
                 + body + "}").getBytes(StandardCharsets.UTF_8);
     }
 }

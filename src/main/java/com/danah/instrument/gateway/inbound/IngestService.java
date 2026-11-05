@@ -39,9 +39,10 @@ public class IngestService {
      * @param protocol  HTTP | TCP | MQTT
      * @param context   where the message arrived from, or {@code null}; used to derive
      *                  {@code sourceId} when the body carries no identity of its own
-     * @return normalized event that was published
+     * @return ids and routing facts the caller needs to answer the client; the Kafka body
+     *         itself is the payload alone
      */
-    public InboundEvent ingest(IngestRequest request, Protocol protocol, IngressContext context) {
+    public IngestResult ingest(IngestRequest request, Protocol protocol, IngressContext context) {
         if (request == null) {
             throw new IngestException(400, "body is required");
         }
@@ -73,39 +74,32 @@ public class IngestService {
                     + MAX_IDEMPOTENCY_KEY_LENGTH + " characters");
         }
 
-        Instant now = Instant.now();
-        Instant occurredAt = now;
+        // occurredAt is still parsed so a malformed timestamp keeps failing with 400, but it has
+        // no field to land in while the Kafka body carries the payload alone.
         if (StringUtils.hasText(request.getOccurredAt())) {
             try {
-                occurredAt = Instant.parse(request.getOccurredAt());
+                Instant.parse(request.getOccurredAt());
             } catch (Exception e) {
                 throw new IngestException(400, "occurredAt must be ISO-8601 instant");
             }
         }
 
+        String eventId = UUID.randomUUID().toString();
+        Instant receivedAt = Instant.now();
+
         InboundEvent event = new InboundEvent();
-        event.setEventId(UUID.randomUUID().toString());
-        event.setSourceId(sourceId);
-        event.setDeviceId(deviceId);
-        event.setType(type);
-        event.setOccurredAt(occurredAt);
-        event.setReceivedAt(now);
-        event.setProtocol(protocol);
         event.setPayload(request.getPayload());
-        event.setSiteId(blankToNull(request.getSiteId()));
-        event.setIdempotencyKey(idempotencyKey);
-        event.setExt(request.getExt());
 
         // Duplicate suppression deliberately lives downstream, not here. An in-memory set would
         // either drop a record that Kafka then fails to persist (real data loss) or have to wait
         // for the ack before recording (blocking on every message), and it would still miss
-        // duplicates after a restart or on a second instance. The key travels to Kafka in the
-        // body and in a header, so the consumer de-duplicates a durable, replayable copy.
-        kafkaProducer.send(event);
+        // duplicates after a restart or on a second instance. The key travels to Kafka in a
+        // header, so the consumer de-duplicates a durable, replayable copy. Key and header are
+        // metadata, not body: sourceId keeps one source on one partition.
+        kafkaProducer.send(event, sourceId, idempotencyKey);
         log.info("ingested eventId={} sourceId={} deviceId={} type={} protocol={} idempotencyKey={}",
-                event.getEventId(), event.getSourceId(), event.getDeviceId(),
-                event.getType(), event.getProtocol(), event.getIdempotencyKey());
-        return event;
+                eventId, sourceId, deviceId, type, protocol, idempotencyKey);
+        return new IngestResult(eventId, sourceId, deviceId, type, receivedAt);
     }
 
     private static String blankToNull(String s) {

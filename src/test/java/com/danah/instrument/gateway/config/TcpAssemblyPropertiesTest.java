@@ -16,8 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Locks {@code gateway.tcp.assembly.*} binding so a typo in application.yml cannot silently
- * fall back to defaults (and so the nested Assembly class stays bindable).
+ * Locks {@code gateway.tcp.assembly.*} and {@code gateway.tcp.auth.*} binding so a typo in
+ * application.yml cannot silently fall back to defaults (and so the nested classes stay bindable).
  */
 class TcpAssemblyPropertiesTest {
 
@@ -42,5 +42,12 @@ class TcpAssemblyPropertiesTest {
         assertEquals(128, assembly.getMaxFragments());
         assertEquals(10000, assembly.getTimeoutMs());
         assertEquals(8, assembly.getMaxPendingPerChannel());
+
+        TcpProperties.Auth auth = props.getAuth();
+        assertNotNull(auth);
+        assertEquals(5000, auth.getHandshakeTimeoutMs());
+        assertEquals(5, auth.getMaxFailuresPerConnection());
+        assertEquals(256, auth.getMaxTokenLength());
+        assertEquals(3600, auth.getSessionTtlSeconds());
     }
 }

@@ -161,7 +161,7 @@ TCP 没有 ACK，客户端超时重发是常态，所以每条记录都应当带
 网关负责三件事：
 
 - **校验**：长度 ≤ 200 字符，首尾空白 trim，空串等同于没传
-- **透传**：写进 Kafka 消息体，**同时**写进 Kafka header `idempotencyKey`
+- **透传**：写进 Kafka header `idempotencyKey`（消息体只剩 `payload` 原文，不带这个字段）
 - **不去重**
 
 为什么网关不做内存去重：
@@ -229,28 +229,100 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8080/api/v1/i
 - 帧 = **2 字节大端 unsigned length** + **UTF-8 JSON**
 - **整帧（含 2 字节头）必须 &lt; 1024**；超限丢弃 + 日志，不写 Kafka
 - **一条记录可以拆成多帧**（大记录分片，见下文）；单帧内的 JSON 也仍可按“一帧一记录”发送
-- JSON 内含 `token`（与全局 Key 同值）；验完**剥离**，不进 Kafka
-- `deviceId` 非必填；省略时身份依次取报文 `sourceId`、key 绑定的 clientId、对端 IP（见上文「身份」）
+- **每条连接必须先完成 AUTH 握手**（见下文）；握手回 `AUTH_OK` 后才发数据帧，且不再带 `token`，body 里万一带了也会被剥离：不参与鉴权、不进 Kafka
+- `deviceId` 非必填；省略时身份依次取报文 `sourceId`、握手时绑定的 clientId、对端 IP（见上文「身份」）
 - 坏 JSON / 校验失败 → 丢弃 + 日志
 
 > **默认长度前缀帧可替换**：厂商帧格式不同时实现/替换 `TcpFrameDecoder`（或换 pipeline factory）即可，不必改 ingest 语义。勿把当前帧格式当成唯一协议。
 
-用 Python 发一帧 DETECT：
+### 连接级认证：AUTH 首帧（唯一方式）
+
+每条连接的第一帧必须认证，之后同一连接上的数据帧不再带 `token`：
+
+```json
+{"type":"AUTH","token":"<GATEWAY_API_KEY>"}
+```
+
+- AUTH 帧被 **消费**，不写 Kafka、不产生 `eventId`；**握手有应答**：成功回 `{"type":"AUTH_OK"}`（20 字节帧），失败回 `{"type":"AUTH_FAIL","reason":"..."}`；业务帧仍然没有 ACK
+- 客户端应**先读到 `AUTH_OK` 再发记录**：key 错了就在握手阶段停住，一帧数据也不会白发；`AUTH_FAIL` 后连接保留到失败上限，可以改 key 重试
+- 握手成功后该连接上的报文**不再校验 body 里的 token**，`clientId` 与对端 IP 固定取握手时的值
+- 握手成功后，同一连接再发 AUTH 会被忽略，绝不会被当成业务事件；body 里的 `token` 只被剥离，不会改写握手身份
+- **首帧不是 AUTH、token 不对、帧读不出来 → 回 `AUTH_FAIL` 并计一次失败**；握手完成前不解析业务帧、不产生 ingest；累计失败达上限时先把回包写完再断开
+- 没有关闭开关：不带 `type=AUTH` 首帧的客户端会一直失败，直到达到失败上限被断开（默认第 5 次失败即断）
+
+`gateway.tcp.auth.*`（`application.yml`）：
+
+| 配置 | 默认 | 说明 |
+|---|---|---|
+| `handshake-timeout-ms` | 5000 | 连接建立后多久必须完成握手，超时断开；握手成功后该超时被移除，允许长连接空闲 |
+| `max-failures-per-connection` | 5 | 同一连接的认证失败次数上限（含首帧非 AUTH 的协议违规），**第 N 次失败即断开**；计数按连接、重连即重置，不是按来源 IP 的限流 |
+| `max-token-length` | 256 | token 长度上限，超长直接判失败 |
+| `session-ttl-seconds` | 3600 | 认证会话有效期；到期断开，客户端需重连重认证；`0` = 不过期 |
+
+用 Python 握手后连发两条业务报文（先等到 `AUTH_OK`）：
+
+```python
+import socket, json, struct, os
+
+key = os.environ.get("GATEWAY_API_KEY", "change-me-local-only")
+s = socket.create_connection(("127.0.0.1", 9100))
+
+def send(body):
+    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    frame = struct.pack(">H", len(payload)) + payload
+    assert len(frame) < 1024
+    s.sendall(frame)
+
+def recv():
+    head = s.recv(2)
+    assert len(head) == 2, "gateway closed the connection without answering AUTH"
+    n = int.from_bytes(head, "big")
+    body = b""
+    while len(body) < n:
+        body += s.recv(n - len(body))
+    return json.loads(body)
+
+send({"type": "AUTH", "token": key})
+reply = recv()
+assert reply["type"] == "AUTH_OK", reply      # AUTH_FAIL 时这里就停，不发数据
+send({"type": "DETECT", "payload": {"itemCode": "PH", "value": 7.1, "unit": "pH"}})
+send({"type": "POWER", "payload": {"state": "ON"}})
+s.close()
+```
+
+> AUTH 首帧本身不加密，只减少 token 暴露次数；网络不可信时见前面第 3 步的方案 D（TLS）/ 方案 E（专线、白名单）。
+
+用 Python 握手后发一帧 DETECT：
 
 ```bash
 python3 - <<'PY'
 import socket, json, struct, os
 key = os.environ.get("GATEWAY_API_KEY", "change-me-local-only")
+
+def frame_of(body):
+    payload = json.dumps(body).encode("utf-8")
+    frame = struct.pack(">H", len(payload)) + payload
+    assert len(frame) < 1024
+    return frame
+
+def recv():
+    head = s.recv(2)
+    assert len(head) == 2, "gateway closed the connection without answering AUTH"
+    n = int.from_bytes(head, "big")
+    body = b""
+    while len(body) < n:
+        body += s.recv(n - len(body))
+    return json.loads(body)
+
 body = {
   "deviceId": "dev-tcp-1",
   "type": "DETECT",
-  "token": key,
-  "payload": {"itemCode": "PH", "value": 7.1, "unit": "pH"}
+  "payload": {"itemCode": "PH", "value": 7.1, "unit": "pH"}   # 不带 token
 }
-payload = json.dumps(body).encode("utf-8")
-frame = struct.pack(">H", len(payload)) + payload
-assert len(frame) < 1024
+frame = frame_of(body)
 s = socket.create_connection(("127.0.0.1", 9100))
+s.sendall(frame_of({"type": "AUTH", "token": key}))   # 首帧握手，缺了它后续帧一律被丢
+assert recv()["type"] == "AUTH_OK"                     # 没收到 AUTH_OK 就别发数据
 s.sendall(frame)
 s.close()
 print("sent", len(frame), "bytes")
@@ -259,7 +331,7 @@ PY
 
 POWER / ALARM / REPORT / SAMPLE 同理，改 `type` 与 `payload`（POWER: `state` ON|OFF；ALARM: `level`/`code`/`message`；REPORT: `result` 必填且必须是对象数组；SAMPLE: `content` 必填且必须是对象）。
 
-### 大记录分片（可选，旧客户端不受影响）
+### 大记录分片（可选）
 
 一条记录大于一帧（payload 上限 1021 字节）时，客户端负责切片，服务端负责拼回。每帧是一个“信封”：
 
@@ -271,7 +343,7 @@ POWER / ALARM / REPORT / SAMPLE 同理，改 `type` 与 `payload`（POWER: `stat
 | `data` | 该片原文（**转义后的 JSON 文本，不是 base64**） |
 
 ```json
-{"msgId":"000001c9a3f4b7d2","seq":1,"total":3,"data":"{\"type\":\"DETECT\",\"token\":\"change-me"}
+{"msgId":"000001c9a3f4b7d2","seq":1,"total":3,"data":"{\"type\":\"DETECT\",\"payload\":{\"itemCode\":
 ```
 
 信封尺寸是**算得出来**的，不是估算：`msgId` 定长 16、`seq`/`total` 各最多 3 位，所以最宽信封 = `{"msgId":"…","seq":999,"total":999,"data":""}` = **60 字节**，一片 `data` 最多带 **961 字节**转义文本（1021 − 60）。要算缓冲区、定分包上限、写文档，都用这两个数，不用再根据片号、总片数、`msgId` 长短去猜。
@@ -279,10 +351,10 @@ POWER / ALARM / REPORT / SAMPLE 同理，改 `type` 与 `payload`（POWER: `stat
 - `data` 放的是原文本身，只做 JSON 字符串转义（`"` → `\"`、换行 → `\n`，控制字符 → `\u0000`）：线上全程是文本，抓包/日志直接可读，也不再多付 base64 的 33% 膨胀；代价是引号密度高的报文会多花约 10–25%
 - **切片必须落在 UTF-8 字符边界上**：从中间切断会把一个多字节字符拆成两片，拼回来的记录不再是合法 UTF-8。切点落在续接字节（`10xxxxxx`）上时向后挪到下一个字符起始
 - **单片大小是目标值，不是硬要求**：每片切多长由“转义后能不能装进 961 字节”决定。引号密、控制字符多时切片会自动变短、片数变多，而不是报错拒发——必须守住的是帧上限，片大小只是达到它的手段
-- 服务端按连接缓存，**按 `seq` 索引，乱序到达也能还原**；收齐 `total` 片才解析、鉴权、写 Kafka → 一条记录只产生一个 `eventId`
+- 服务端按连接缓存，**按 `seq` 索引，乱序到达也能还原**；收齐 `total` 片才解析、校验、写 Kafka → 一条记录只产生一个 `eventId`
 - 同一 `msgId` 的所有分片必须走**同一条 TCP 连接**；断连时未完成记录丢弃并记 warn
-- `token` 放在**原始记录**里（拼好后校验），不需要每片都带
-- 不带 `msgId`/`seq`/`total` 的帧仍按“一帧一记录”解析（向后兼容）
+- 分片在**握手之后**发送：连接已认证，分片只装原文、不带 token；收齐后整体解析、校验、写 Kafka
+- 不带 `msgId`/`seq`/`total` 的帧仍按“一帧一记录”解析（分片是可选的）
 - 上限（`application.yml` 的 `gateway.tcp.assembly.*`）：`max-bytes` 64KB / `max-fragments` 128 / `timeout-ms` 10s / `max-pending-per-channel` 8
 - 容量：一帧 1021 字节，定长信封最宽 60 字节，转义一般膨胀 1.1–1.25 倍 → 默认目标 **740 字节原文**（实际每片会按转义结果自动微调，但不超 961）；128 片 × 740 字节 ≈ 92KB，足以覆盖 64KB 的记录上限（`TcpFrameCapacityTest` 会守护这两个值不自相矛盾）
 
@@ -292,7 +364,7 @@ Python 分片发送示例：
 import socket, json, struct, os, uuid
 
 key = os.environ.get("GATEWAY_API_KEY", "change-me-local-only")
-body = {"type": "DETECT", "token": key,
+body = {"type": "DETECT",
         "payload": {"itemCode": "PH", "value": 7.1, "unit": "pH"}}
 text = json.dumps(body, ensure_ascii=False)
 raw = text.encode("utf-8")
@@ -317,6 +389,16 @@ parts = slices(text, chunk)
 
 total = len(parts)
 s = socket.create_connection(("127.0.0.1", 9100))
+auth = json.dumps({"type": "AUTH", "token": key}, separators=(",", ":")).encode("utf-8")
+s.sendall(struct.pack(">H", len(auth)) + auth)   # 先握手，分片才有意义
+
+head = s.recv(2)                                 # 等 AUTH_OK；AUTH_FAIL 时应直接放弃
+assert len(head) == 2, "gateway closed the connection without answering AUTH"
+reply = b""
+while len(reply) < int.from_bytes(head, "big"):
+    reply += s.recv(int.from_bytes(head, "big") - len(reply))
+assert json.loads(reply)["type"] == "AUTH_OK", reply
+
 for i, part in enumerate(parts, 1):
     env = json.dumps({"msgId": msg_id, "seq": i, "total": total, "data": part},
                      ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -329,13 +411,12 @@ print("sent", total, "fragments", len(raw), "bytes")
 
 ### REPORT 大报告怎么组织（真实样本）
 
-检验仪器（如 GM 试验）一份报告常有几十上百条明细：实测 77 条 = **12,086 字节 ≈ 17 片**。推荐外层只加网关字段，报告本体原样放进 `payload`：
+检验仪器（如 GM 试验）一份报告常有几十上百条明细：实测 77 条，报告本体 **12,086 字节**，加外层字段后记录 **12,245 字节 → 17 片**（740 字节/片）。推荐外层只加网关字段，报告本体原样放进 `payload`：
 
 ```json
 {
   "deviceId": "100C200017",
   "type": "REPORT",
-  "token": "<GATEWAY_API_KEY>",
   "occurredAt": "2026-11-03T23:27:34Z",
   "siteId": "krd",
   "idempotencyKey": "100C200017-20261103232734",
@@ -359,7 +440,6 @@ print("sent", total, "fragments", len(raw), "bytes")
 {
   "deviceId": "screen-6",
   "type": "SAMPLE",
-  "token": "<GATEWAY_API_KEY>",
   "occurredAt": "2026-11-04T11:21:29Z",
   "siteId": "dnk",
   "idempotencyKey": "89860625790032599518-20261104112129",
@@ -370,7 +450,7 @@ print("sent", total, "fragments", len(raw), "bytes")
 | 项 | 说明 |
 |---|---|
 | `type` | 固定 `SAMPLE`；`payload.content` 必填且必须是对象（`concentration` / `result` / `temperature` 等测量值字段不强制，因仪器而异） |
-| 体积 | 原始 521 字节，加外层信封 **701 字节** → 单帧（≤ 1021）直发，**不需要分片**；余量仅 **320 字节** |
+| 体积 | `payload` 本体 521 字节，加外层信封 **604 字节**（帧 606 字节 < 1024）→ 单帧直发，**不需要分片**；余量 **417 字节** |
 | `idempotencyKey` | 用 `iccid-checkTime`，不用 `content.deviceId`——后者可能是中文（如 `屏幕测试6`），会影响日志检索与下游键值处理 |
 | `deviceId` | 可选，取 `content.deviceId` 也行、留空也行；真要长期关联设备，建议换成 ASCII 稳定标识（如 `iccid` 或仪器序列号），中文值会影响日志检索与下游键值处理 |
 | 连续上报 | 同一 TCP 连接可连续发多条 SAMPLE，每条独立成帧、各自入库；余量不足时客户端必须改走分片（`data` 字段） |
@@ -384,27 +464,29 @@ print("sent", total, "fragments", len(raw), "bytes")
 # 只看切帧结果，不连服务（单文件源码模式，无需构建）
 java src/test/java/com/danah/instrument/gateway/tools/TcpSampleSender.java --dry-run
 
-# 真实发送（默认 127.0.0.1:9100，token 默认 change-me-local-only）
+# 真实发送：先 AUTH，读到 AUTH_OK 才发记录；AUTH_FAIL 时一帧数据也不发
 java src/test/java/com/danah/instrument/gateway/tools/TcpSampleSender.java --token change-me-local-only
 
 # 或者用编译产物（mvn test-compile 之后）
 java -cp target/test-classes com.danah.instrument.gateway.tools.TcpSampleSender --dry-run
 ```
 
-实测输出：GM 报告 `12,276 B → 17 片`（最大整帧 978 B，最后一片 599 B）；单条结果 `635 B → 1 帧`（637 B）；合计 18 帧 / 16,842 字节线上流量。
+实测输出（同一条连接）：握手帧 `48 B`，网关回 `AUTH_OK`（`20 B`）；GM 报告 `12,245 B → 17 片`（最大整帧 977 B，最后一片 561 B）；单条结果 `604 B → 1 帧`（606 B）；合计客户端 19 帧 / 16,824 字节，另加 20 字节握手回包。
 
-报文里**只带 `type` / `token` / `idempotencyKey` / `payload` 四个字段**：`deviceId` 不是必填，`occurredAt` 缺省时取接收时间，`siteId` 由下游按 `payload.orgCode` 补。`type` 和 `idempotencyKey` 是唯一不能省的两个——前者决定校验规则，后者决定下游能不能去重。
+报文**只带 `type` / `idempotencyKey` / `payload` 三个字段**，不带 `token`（凭据只在握手时用过一次）：`deviceId` 不是必填，`occurredAt` 缺省时取接收时间，`siteId` 由下游按 `payload.orgCode` 补。`type` 和 `idempotencyKey` 是唯一不能省的两个——前者决定校验规则，后者决定下游能不能去重。
 
-服务端每个记录只打印一行 `ingested eventId=... sourceId=... deviceId=... type=REPORT|SAMPLE protocol=TCP`，随后异步写入 `instr.event.v1`（DEBUG 可看到 `Kafka sent ... offset=...`）。**该协议没有 ACK**，发送成功与否只能看服务端日志与 Kafka，客户端不能靠 socket 返回值判断。
+服务端每个记录只打印一行 `ingested eventId=... sourceId=... deviceId=... type=REPORT|SAMPLE protocol=TCP`，随后异步写入 `instr.event.v1`（DEBUG 可看到 `Kafka sent ... offset=...`）。**业务帧没有 ACK**（只有握手有 `AUTH_OK`/`AUTH_FAIL`），记录是否入库只能看服务端日志与 Kafka，客户端不能靠 socket 返回值判断。
+
+工具等握手回包最多 **4.5 s**（低于服务端的 5 s 握手超时）：端口通但网关不回包时打印 `handshake timeout: ...` 并以退出码 3 结束，不会把原因误报成“连不上”。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--host` / `--port` | `127.0.0.1` / `9100` | 也可用 `GATEWAY_TCP_HOST`、`GATEWAY_TCP_PORT` |
-| `--token` | `change-me-local-only` | 对应 `gateway.api-key`，也可用 `GATEWAY_API_KEY` |
+| `--token` | `change-me-local-only` | 对应 `gateway.api-key`，也可用 `GATEWAY_API_KEY`；首个 AUTH 帧用它握手 |
 | `--chunk` | `740` | 每片的目标原文字节数；转义后装不进一帧时会自动切短，不会报错 |
 | `--data-dir` | `src/test/resources/tcp` | 样本目录 |
 
-切帧逻辑由 `TcpSampleSenderTest` 守护：`msgId` 定长 16 位十六进制、信封 60 B + 数据 961 B = 一帧 1021 B 的恒等式、单帧/分片边界、`seq`/`total` 1 基、转义文本拼接还原（含 UTF-8 跨片用例）、`--chunk` 超限自动切短而不是报错（引号密、控制字符多两种情形）、`data` 必须是原文而非 base64、信封必带 `idempotencyKey` 且不得出现冗余业务字段、重发两次字节完全一致，以及上面两个实测数字（12,276 B → 17 片、635 B → 1 帧）。
+切帧逻辑由 `TcpSampleSenderTest` 守护：`msgId` 定长 16 位十六进制、信封 60 B + 数据 961 B = 一帧 1021 B 的恒等式、单帧/分片边界、`seq`/`total` 1 基、转义文本拼接还原（含 UTF-8 跨片用例）、`--chunk` 超限自动切短而不是报错（引号密、控制字符多两种情形）、`data` 必须是原文而非 base64、信封必带 `idempotencyKey` 且不得出现冗余业务字段、握手指令只有 `type`/`token` 两个字段、记录不带 token、重发两次字节完全一致、握手回包的读取与 `AUTH_FAIL` 中止（含服务端不给回包时直接报错、端口通但不回包按握手超时分类），以及上面那组实测数字（12,245 B → 17 片 / 604 B → 1 帧）。
 
 ## MQTT 样例
 
@@ -442,9 +524,9 @@ kafka-console-consumer --bootstrap-server 192.168.11.114:9092 \
   --topic instr.event.v1 --from-beginning --property print.key=true
 ```
 
-归一后消息字段：`eventId`（网关生成）、`sourceId`（必有，Kafka key）、`deviceId`（可空）、`type`、`occurredAt`、`receivedAt`、`protocol`、`payload`，以及可选 `siteId` / `idempotencyKey` / `ext`。**不含** `token`。
+**Kafka 消息体 = 客户端 `payload` 原文**，外面不再包网关信封：`eventId` / `sourceId` / `deviceId` / `type` / `occurredAt` / `receivedAt` / `protocol` / `siteId` / `idempotencyKey` / `ext` 当前都不写入消息体。**不含** `token`。分区键仍是 `sourceId`（见上文「身份」），幂等键仍写 header。
 
-`idempotencyKey` 除消息体外，还会重复写一份到 Kafka header `idempotencyKey`。想看 header：
+`idempotencyKey` 只写 Kafka header，不在消息体里。想看 header：
 
 ```bash
 kafka-console-consumer --bootstrap-server localhost:9092 \

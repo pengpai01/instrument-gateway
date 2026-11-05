@@ -1,9 +1,9 @@
 package com.danah.instrument.gateway.inbound.http;
 
 import com.danah.instrument.gateway.auth.ApiKeyAuthFilter;
+import com.danah.instrument.gateway.inbound.IngestResult;
 import com.danah.instrument.gateway.inbound.IngestService;
 import com.danah.instrument.gateway.inbound.IngressContext;
-import com.danah.instrument.gateway.inbound.model.InboundEvent;
 import com.danah.instrument.gateway.inbound.model.IngestRequest;
 import com.danah.instrument.gateway.inbound.model.Protocol;
 import jakarta.servlet.http.HttpServletRequest;
@@ -42,13 +42,13 @@ public class IngestController {
                 null,
                 httpRequest.getRemoteAddr());
 
-        InboundEvent event = ingestService.ingest(body, Protocol.HTTP, context);
+        IngestResult result = ingestService.ingest(body, Protocol.HTTP, context);
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("eventId", event.getEventId());
-        resp.put("sourceId", event.getSourceId());
-        resp.put("deviceId", event.getDeviceId());
-        resp.put("type", event.getType().name());
-        resp.put("receivedAt", event.getReceivedAt().toString());
+        resp.put("eventId", result.eventId());
+        resp.put("sourceId", result.sourceId());
+        resp.put("deviceId", result.deviceId());
+        resp.put("type", result.type().name());
+        resp.put("receivedAt", result.receivedAt().toString());
         return ResponseEntity.accepted().body(resp);
     }
 }

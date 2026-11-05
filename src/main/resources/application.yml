@@ -60,6 +60,13 @@ gateway:
       max-fragments: 128
       timeout-ms: 10000
       max-pending-per-channel: 8
+    # Connection-level auth: every connection must open with one {"type":"AUTH","token":"..."}
+    # frame before any record is accepted.
+    auth:
+      handshake-timeout-ms: 5000
+      max-failures-per-connection: 5
+      max-token-length: 256
+      session-ttl-seconds: 3600       # 0 = never expire
   mqtt:
     # Empty = MQTT disabled; process still starts. Set via local profile / env.
     broker-url: ${GATEWAY_MQTT_BROKER_URL:}

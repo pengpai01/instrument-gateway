@@ -1,6 +1,5 @@
 package com.danah.instrument.gateway.inbound.tcp;
 
-import com.danah.instrument.gateway.auth.ApiKeyAuthenticator;
 import com.danah.instrument.gateway.config.TcpProperties;
 import com.danah.instrument.gateway.inbound.IngestException;
 import com.danah.instrument.gateway.inbound.IngestService;
@@ -29,18 +28,15 @@ public class TcpInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
     private static final Logger log = LoggerFactory.getLogger(TcpInboundHandler.class);
 
     private final IngestService ingestService;
-    private final ApiKeyAuthenticator authenticator;
     private final ObjectMapper objectMapper;
     private final TcpProperties tcpProperties;
     private final TcpFragmentAssembler fragmentAssembler;
 
     public TcpInboundHandler(IngestService ingestService,
-                             ApiKeyAuthenticator authenticator,
                              ObjectMapper objectMapper,
                              TcpProperties tcpProperties,
                              TcpFragmentAssembler fragmentAssembler) {
         this.ingestService = ingestService;
-        this.authenticator = authenticator;
         this.objectMapper = objectMapper;
         this.tcpProperties = tcpProperties;
         this.fragmentAssembler = fragmentAssembler;
@@ -76,18 +72,30 @@ public class TcpInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
             return;
         }
 
-        String token = request.getToken();
-        request.setToken(null); // strip — never into Kafka
-        if (!authenticator.matches(token)) {
-            log.warn("TCP auth failed from {} — discarded", ctx.channel().remoteAddress());
+        // The connection is already authenticated; strip the field anyway so a stray token in a
+        // record body can never reach Kafka.
+        request.setToken(null);
+
+        // AUTH is a first-frame handshake owned by ConnectionAuthHandler. One arriving mid-stream
+        // carries no authority, and AUTH is not an event type, so it must not reach ingest.
+        if (ConnectionAuthHandler.AUTH_TYPE.equalsIgnoreCase(request.getType())) {
+            log.warn("TCP AUTH frame ignored from {} — the handshake only counts on the first frame",
+                    ctx.channel().remoteAddress());
+            return;
+        }
+
+        // ConnectionAuthHandler forwards nothing before a successful handshake. Reaching here
+        // without a principal means the pipeline was assembled wrongly: fail closed.
+        TcpAuthPrincipal principal = TcpAuthState.principal(ctx.channel());
+        if (principal == null) {
+            log.warn("TCP frame without a handshake from {} — discarded", ctx.channel().remoteAddress());
             return;
         }
 
         try {
-            // peer IP is the last-resort identity for a client that sends neither deviceId nor
-            // sourceId; the bound clientId (if the key came from gateway.clients) outranks it
-            IngressContext ingress = new IngressContext(
-                    null, authenticator.clientIdOf(token), null, remoteHost(ctx.channel()));
+            // the handshake fixed the identity: clientId (if the key was bound) and the peer IP
+            // outrank anything a device writes into its own payload
+            IngressContext ingress = new IngressContext(null, principal.clientId(), null, principal.remoteHost());
             ingestService.ingest(request, Protocol.TCP, ingress);
         } catch (IngestException e) {
             log.warn("TCP ingest rejected: {} — discarded", e.getMessage());
@@ -107,7 +115,7 @@ public class TcpInboundHandler extends SimpleChannelInboundHandler<ByteBuf> {
 
     /**
      * Frames carrying msgId/seq/total are fragments of one JSON record; merge them before parsing.
-     * Frames without those fields are parsed as a single-frame record (legacy format).
+     * Frames without those fields are parsed as one whole record.
      *
      * @return the complete record bytes, or {@code null} while more fragments are needed
      */

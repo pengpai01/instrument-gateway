@@ -14,6 +14,8 @@ public class TcpProperties {
     private int workerThreads = 2;
     /** Multi-frame reassembly: a record larger than one frame is split by the client. */
     private Assembly assembly = new Assembly();
+    /** Connection-level authentication (AUTH handshake) and token limits. */
+    private Auth auth = new Auth();
 
     public boolean isEnabled() {
         return enabled;
@@ -69,6 +71,14 @@ public class TcpProperties {
 
     public void setAssembly(Assembly assembly) {
         this.assembly = assembly;
+    }
+
+    public Auth getAuth() {
+        return auth;
+    }
+
+    public void setAuth(Auth auth) {
+        this.auth = auth;
     }
 
     /**
@@ -130,6 +140,61 @@ public class TcpProperties {
 
         public void setMaxPendingPerChannel(int maxPendingPerChannel) {
             this.maxPendingPerChannel = maxPendingPerChannel;
+        }
+    }
+
+    /**
+     * Authentication policy for the TCP listener.
+     * <p>
+     * Every connection must open with the handshake frame
+     * {@code {"type":"AUTH","token":"<key>"}}. Once accepted, later frames on that connection
+     * need no token and the token itself never reaches Kafka. Any frame before a successful
+     * handshake is a protocol violation and is discarded.
+     */
+    public static class Auth {
+
+        /** A connection that does not complete the handshake within this window is closed. */
+        private int handshakeTimeoutMs = 5000;
+        /**
+         * Rejected handshakes per connection: the one that reaches this count closes the connection
+         * (values below 1 behave like 1).
+         */
+        private int maxFailuresPerConnection = 5;
+        /** Longest accepted token; also bounds the comparison work per attempt. */
+        private int maxTokenLength = 256;
+        /** Authenticated session lifetime in seconds; on expiry the connection is closed and must re-AUTH. 0 = never expires. */
+        private int sessionTtlSeconds = 3600;
+
+        public int getHandshakeTimeoutMs() {
+            return handshakeTimeoutMs;
+        }
+
+        public void setHandshakeTimeoutMs(int handshakeTimeoutMs) {
+            this.handshakeTimeoutMs = handshakeTimeoutMs;
+        }
+
+        public int getMaxFailuresPerConnection() {
+            return maxFailuresPerConnection;
+        }
+
+        public void setMaxFailuresPerConnection(int maxFailuresPerConnection) {
+            this.maxFailuresPerConnection = maxFailuresPerConnection;
+        }
+
+        public int getMaxTokenLength() {
+            return maxTokenLength;
+        }
+
+        public void setMaxTokenLength(int maxTokenLength) {
+            this.maxTokenLength = maxTokenLength;
+        }
+
+        public int getSessionTtlSeconds() {
+            return sessionTtlSeconds;
+        }
+
+        public void setSessionTtlSeconds(int sessionTtlSeconds) {
+            this.sessionTtlSeconds = sessionTtlSeconds;
         }
     }
 }

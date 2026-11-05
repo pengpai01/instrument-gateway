@@ -1,12 +1,9 @@
 package com.danah.instrument.gateway.kafka;
 
 import com.danah.instrument.gateway.config.KafkaTopicProperties;
-import com.danah.instrument.gateway.inbound.model.EventType;
 import com.danah.instrument.gateway.inbound.model.InboundEvent;
-import com.danah.instrument.gateway.inbound.model.Protocol;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.header.Header;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,10 +13,10 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,10 +26,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Guards the two things a consumer relies on: the partition key and the idempotency header.
- * The body carries the key too, but a header lets a stream job de-duplicate without parsing.
+ * Guards what a consumer relies on: the body is the payload alone, the partition key is the
+ * ingress identity, and the de-duplication key travels on a header.
  */
 class EventKafkaProducerTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
 
     private KafkaTemplate<String, String> template;
     private EventKafkaProducer producer;
@@ -46,17 +45,27 @@ class EventKafkaProducerTest {
 
         KafkaTopicProperties topics = new KafkaTopicProperties();
         topics.setTopic("instr.event.v1");
-        // same shape the application uses: Instant as an ISO string, not an epoch array
-        ObjectMapper mapper = new ObjectMapper()
-                .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         producer = new EventKafkaProducer(template, topics, mapper);
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void idempotencyKeyGoesOnAHeaderAndInTheBody() {
-        producer.send(event("dev-1", "dev-1", "order-1-20261104120000"));
+    void bodyIsThePayloadAlone() throws Exception {
+        producer.send(event(payload()), "dev-1", "order-1-20261104120000");
+
+        ProducerRecord<String, String> record = sentRecord();
+        JsonNode body = mapper.readTree(record.value());
+
+        assertTrue(body.isObject(), "the body must stay a JSON object");
+        assertEquals(2, body.size(), "no envelope keys around the payload");
+        assertEquals("ON", body.get("state").asText());
+        assertEquals("boot", body.get("reason").asText());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void idempotencyKeyGoesOnAHeaderOnly() {
+        producer.send(event(payload()), "dev-1", "order-1-20261104120000");
 
         ProducerRecord<String, String> record = sentRecord();
 
@@ -65,39 +74,28 @@ class EventKafkaProducerTest {
         assertNotNull(header, "the consumer de-duplicates on this header");
         assertEquals("order-1-20261104120000",
                 new String(header.value(), StandardCharsets.UTF_8));
-        assertTrue(record.value().contains("\"idempotencyKey\":\"order-1-20261104120000\""),
-                "the body must keep the key as well, so a replay from the topic is self-contained");
+        assertFalse(record.value().contains("idempotencyKey"),
+                "the key must not reappear in the body");
     }
 
     @Test
     @SuppressWarnings("unchecked")
     void noHeaderWhenTheClientSentNoKey() {
-        producer.send(event("dev-1", "dev-1", null));
+        producer.send(event(payload()), "dev-1", null);
 
         ProducerRecord<String, String> record = sentRecord();
 
         assertNull(record.headers().lastHeader(EventKafkaProducer.HEADER_IDEMPOTENCY_KEY));
-        assertTrue(record.value().contains("\"idempotencyKey\":null"),
-                "the field stays in the body as null, so consumers see an explicit absence");
+        assertFalse(record.value().contains("idempotencyKey"));
     }
 
     @Test
     @SuppressWarnings("unchecked")
-    void partitionKeyIsSourceIdEvenWhenDeviceIdDiffers() {
+    void partitionKeyIsTheGivenSourceId() {
         // one analyser can report many deviceIds; ordering follows the ingress identity
-        producer.send(event("krd-lab-01", "100C200017", "k1"));
+        producer.send(event(payload()), "krd-lab-01", "k1");
 
         assertEquals("krd-lab-01", sentRecord().key());
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void partitionKeySurvivesAMissingDeviceId() {
-        producer.send(event("10.2.3.4", null, "k2"));
-
-        ProducerRecord<String, String> record = sentRecord();
-        assertEquals("10.2.3.4", record.key(), "a null deviceId must not null the key");
-        assertTrue(record.value().contains("\"deviceId\":null"));
     }
 
     @SuppressWarnings("unchecked")
@@ -108,16 +106,13 @@ class EventKafkaProducerTest {
         return captor.getValue();
     }
 
-    private static InboundEvent event(String sourceId, String deviceId, String idempotencyKey) {
+    private JsonNode payload() {
+        return mapper.createObjectNode().put("state", "ON").put("reason", "boot");
+    }
+
+    private static InboundEvent event(JsonNode payload) {
         InboundEvent event = new InboundEvent();
-        event.setEventId("event-1");
-        event.setSourceId(sourceId);
-        event.setDeviceId(deviceId);
-        event.setType(EventType.POWER);
-        event.setOccurredAt(Instant.parse("2026-11-04T12:00:00Z"));
-        event.setReceivedAt(Instant.parse("2026-11-04T12:00:01Z"));
-        event.setProtocol(Protocol.TCP);
-        event.setIdempotencyKey(idempotencyKey);
+        event.setPayload(payload);
         return event;
     }
 }

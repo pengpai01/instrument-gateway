@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 
@@ -15,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -187,10 +190,10 @@ class TcpSampleSenderTest {
     @Test
     void realGmReportMatchesTheDocumentedSizeAndFrameCount() throws IOException {
         String record = new IngestRecord("GM", "REPORT", "100C200017-20261103232734",
-                readResource("/tcp/sample-report-gm.json")).toJson(TOKEN);
+                readResource("/tcp/sample-report-gm.json")).toJson();
         byte[] bytes = record.getBytes(StandardCharsets.UTF_8);
 
-        assertEquals(12276, bytes.length, "12,086 B payload + 190 B envelope");
+        assertEquals(12245, bytes.length, "12,086 B payload + 159 B envelope");
         assertEquals(17, TcpSampleSender.frames(bytes, MSG_ID, TcpSampleSender.DEFAULT_CHUNK).size());
     }
 
@@ -198,22 +201,33 @@ class TcpSampleSenderTest {
     void realSingleSampleFitsOneFrame() throws IOException {
         String record = new IngestRecord("SAMPLE", "SAMPLE",
                 "89860625790032599518-20261104112129",
-                readResource("/tcp/sample-result-screen.json")).toJson(TOKEN);
+                readResource("/tcp/sample-result-screen.json")).toJson();
         byte[] bytes = record.getBytes(StandardCharsets.UTF_8);
 
-        assertEquals(635, bytes.length, "521 B payload + 114 B envelope");
+        assertEquals(604, bytes.length, "521 B payload + 83 B envelope");
         assertEquals(1, TcpSampleSender.frames(bytes, MSG_ID, 700).size());
     }
 
     @Test
-    void envelopeCarriesIdempotencyKeyAndNoRedundantBusinessFields() {
+    void authFrameIsTheDocumentedHandshake() throws IOException {
+        byte[] frame = TcpSampleSender.authFrame(TOKEN);
+
+        JsonNode body = mapper.readTree(frame);
+        assertEquals("AUTH", body.get("type").asText());
+        assertEquals(TOKEN, body.get("token").asText());
+        assertEquals(2, body.size(), "the gateway reads type and token only");
+        assertTrue(frame.length <= MAX_PAYLOAD, "a handshake must fit one frame, got " + frame.length + " B");
+    }
+
+    @Test
+    void envelopeCarriesIdempotencyKeyAndNoCredential() {
         // idempotencyKey must stay: it is the only thing the downstream can de-duplicate on.
         // deviceId / siteId / occurredAt stay out: the gateway derives or defaults them.
         JsonNode body = readTree(new IngestRecord("x", "POWER", "pump-7-20261104121000",
-                "{\"state\":\"ON\"}").toJson(TOKEN));
+                "{\"state\":\"ON\"}").toJson());
 
         assertEquals("POWER", body.get("type").asText());
-        assertEquals(TOKEN, body.get("token").asText());
+        assertNull(body.get("token"), "the connection authenticated already: no credential in the record");
         assertEquals("pump-7-20261104121000", body.get("idempotencyKey").asText());
         assertEquals("ON", body.get("payload").get("state").asText());
         assertNull(body.get("deviceId"), "deviceId must not be written");
@@ -230,12 +244,70 @@ class TcpSampleSenderTest {
         IngestRecord retry = new IngestRecord("GM", "REPORT",
                 "100C200017-20261103232734", payload);
 
-        assertEquals(first.toJson(TOKEN), retry.toJson(TOKEN),
+        assertEquals(first.toJson(), retry.toJson(),
                 "two sends of the same record must be byte-identical, key included");
-        assertEquals(TcpSampleSender.frames(first.toJson(TOKEN).getBytes(StandardCharsets.UTF_8),
+        assertEquals(TcpSampleSender.frames(first.toJson().getBytes(StandardCharsets.UTF_8),
                         MSG_ID, 700).size(),
-                TcpSampleSender.frames(retry.toJson(TOKEN).getBytes(StandardCharsets.UTF_8),
+                TcpSampleSender.frames(retry.toJson().getBytes(StandardCharsets.UTF_8),
                         MSG_ID, 700).size());
+    }
+
+    @Test
+    void handshakeReplyIsReadFromTheSameFraming() throws IOException {
+        try (InputStream in = new ByteArrayInputStream(framed("{\"type\":\"AUTH_OK\"}"))) {
+            byte[] reply = TcpSampleSender.awaitAuthReply(in);
+
+            assertEquals(TcpSampleSender.AUTH_OK, TcpSampleSender.requireAuthOk(reply));
+        }
+    }
+
+    @Test
+    void aSilentGatewayIsReportedAsAHandshakeTimeoutNotAConnectionFailure() {
+        // the port answered and then said nothing: SO_TIMEOUT fires, and that is not "is the
+        // gateway running?" — the TCP connection was up the whole time
+        InputStream silent = new InputStream() {
+            @Override
+            public int read() throws IOException {
+                throw new SocketTimeoutException("Read timed out");
+            }
+        };
+
+        TcpSampleSender.HandshakeTimeoutException error = assertThrows(
+                TcpSampleSender.HandshakeTimeoutException.class,
+                () -> TcpSampleSender.awaitAuthReply(silent));
+
+        assertTrue(error.getMessage().contains(TcpSampleSender.AUTH_REPLY_TIMEOUT_MS + " ms"),
+                error.getMessage());
+        assertTrue(error.getMessage().contains("no records sent"), error.getMessage());
+    }
+
+    @Test
+    void authFailAbortsWithTheServerReasonAndSendsNoRecords() throws IOException {
+        String json = "{\"type\":\"AUTH_FAIL\",\"reason\":\"invalid token\"}";
+        try (InputStream in = new ByteArrayInputStream(framed(json))) {
+            byte[] reply = TcpSampleSender.readFrame(in);
+
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> TcpSampleSender.requireAuthOk(reply));
+            assertTrue(error.getMessage().contains("invalid token"), error.getMessage());
+            assertTrue(error.getMessage().contains("no records sent"), error.getMessage());
+        }
+    }
+
+    @Test
+    void aConnectionClosedWithoutAnAnswerIsAnError() {
+        assertThrows(IllegalStateException.class,
+                () -> TcpSampleSender.readFrame(new ByteArrayInputStream(new byte[0])));
+    }
+
+    /** One length-prefixed frame, the way the gateway writes a handshake reply. */
+    private static byte[] framed(String json) {
+        byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+        byte[] frame = new byte[payload.length + 2];
+        frame[0] = (byte) (payload.length >>> 8);
+        frame[1] = (byte) payload.length;
+        System.arraycopy(payload, 0, frame, 2, payload.length);
+        return frame;
     }
 
     /** Printable ASCII with the ~10% quote density real JSON carries, so escaping is realistic. */

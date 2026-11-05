@@ -2,83 +2,22 @@ package com.danah.instrument.gateway.inbound.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
-import java.time.Instant;
-import java.util.Map;
-
+/**
+ * Kafka message body.
+ *
+ * <p>Carries the analyser payload and nothing else: {@code EventKafkaProducer} serialises
+ * {@link #getPayload()}, so the topic value is exactly the JSON the instrument sent, with no
+ * gateway envelope around it.
+ *
+ * <p>{@code eventId}, {@code sourceId}, {@code deviceId}, {@code type}, {@code occurredAt},
+ * {@code receivedAt}, {@code protocol}, {@code siteId}, {@code idempotencyKey} and {@code ext}
+ * were dropped on purpose while the downstream contract stays minimal. Identity and the
+ * de-duplication key did not disappear — they travel as the Kafka record key and header instead,
+ * which is why they must not be re-added here without also changing the producer.
+ */
 public class InboundEvent {
 
-    private String eventId;
-    /**
-     * Ingress identity, always present. Kafka key = this value, so every event from one source
-     * stays on one partition and keeps its order.
-     */
-    private String sourceId;
-    /** Business identifier; null when the instrument cannot report one. */
-    private String deviceId;
-    private EventType type;
-    private Instant occurredAt;
-    private Instant receivedAt;
-    private Protocol protocol;
     private JsonNode payload;
-    private String siteId;
-    private String idempotencyKey;
-    private Map<String, Object> ext;
-
-    public String getEventId() {
-        return eventId;
-    }
-
-    public void setEventId(String eventId) {
-        this.eventId = eventId;
-    }
-
-    public String getSourceId() {
-        return sourceId;
-    }
-
-    public void setSourceId(String sourceId) {
-        this.sourceId = sourceId;
-    }
-
-    public String getDeviceId() {
-        return deviceId;
-    }
-
-    public void setDeviceId(String deviceId) {
-        this.deviceId = deviceId;
-    }
-
-    public EventType getType() {
-        return type;
-    }
-
-    public void setType(EventType type) {
-        this.type = type;
-    }
-
-    public Instant getOccurredAt() {
-        return occurredAt;
-    }
-
-    public void setOccurredAt(Instant occurredAt) {
-        this.occurredAt = occurredAt;
-    }
-
-    public Instant getReceivedAt() {
-        return receivedAt;
-    }
-
-    public void setReceivedAt(Instant receivedAt) {
-        this.receivedAt = receivedAt;
-    }
-
-    public Protocol getProtocol() {
-        return protocol;
-    }
-
-    public void setProtocol(Protocol protocol) {
-        this.protocol = protocol;
-    }
 
     public JsonNode getPayload() {
         return payload;
@@ -86,29 +25,5 @@ public class InboundEvent {
 
     public void setPayload(JsonNode payload) {
         this.payload = payload;
-    }
-
-    public String getSiteId() {
-        return siteId;
-    }
-
-    public void setSiteId(String siteId) {
-        this.siteId = siteId;
-    }
-
-    public String getIdempotencyKey() {
-        return idempotencyKey;
-    }
-
-    public void setIdempotencyKey(String idempotencyKey) {
-        this.idempotencyKey = idempotencyKey;
-    }
-
-    public Map<String, Object> getExt() {
-        return ext;
-    }
-
-    public void setExt(Map<String, Object> ext) {
-        this.ext = ext;
     }
 }

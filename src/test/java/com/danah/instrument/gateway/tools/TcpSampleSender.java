@@ -1,9 +1,11 @@
 package com.danah.instrument.gateway.tools;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -29,7 +31,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * envelope past {@link #MAX_PAYLOAD}, that slice is cut shorter. A quote-heavy record therefore
  * sends more, smaller frames instead of failing.
  *
- * <p>The gateway does not answer: success is confirmed by its log line
+ * <p>The connection opens with one {@code {"type":"AUTH","token":"..."}} frame and the records
+ * that follow carry no token. The gateway answers the handshake with {@code AUTH_OK} or
+ * {@code AUTH_FAIL}: the tool waits for that reply and sends nothing on failure, so a wrong key
+ * costs zero records. Business frames stay unanswered.
+ *
+ * <p>Success is confirmed by the gateway log line
  * {@code ingested ... type=REPORT} and by the Kafka consumer, not by the socket.
  *
  * <p>Lives under {@code src/test/java} on purpose: it is compiled by {@code mvn test-compile}
@@ -69,6 +76,17 @@ public final class TcpSampleSender {
     /** Seeded from the clock so ids differ between runs; the width is what matters. */
     private static final AtomicLong MSG_ID_COUNTER = new AtomicLong(System.currentTimeMillis());
 
+    /** {@code type} of the handshake reply that opens the data phase. */
+    static final String AUTH_OK = "AUTH_OK";
+    /** {@code type} of the rejection reply; it always carries a {@code reason}. */
+    static final String AUTH_FAIL = "AUTH_FAIL";
+    /**
+     * Slightly under {@code gateway.tcp.auth.handshake-timeout-ms} (5000): when the port answers
+     * but the gateway never replies, the tool must name that timeout itself instead of waiting
+     * for the server to close the connection under it.
+     */
+    static final int AUTH_REPLY_TIMEOUT_MS = 4500;
+
     public static void main(String[] args) throws Exception {
         Options opt;
         try {
@@ -88,6 +106,10 @@ public final class TcpSampleSender {
         } catch (IllegalArgumentException | IllegalStateException e) {
             System.err.println("error: " + e.getMessage());
             System.exit(2);
+        } catch (HandshakeTimeoutException e) {
+            // the TCP connection was up: this is a handshake problem, not a connection problem
+            System.err.println("handshake timeout: " + e.getMessage());
+            System.exit(3);
         } catch (IOException e) {
             System.err.println("connection failed: " + e.getMessage());
             System.err.println("is the gateway running? check gateway.tcp.port=9100 and --token");
@@ -108,17 +130,32 @@ public final class TcpSampleSender {
                         "89860625790032599518-20261104112129", sampleJson));
 
         System.out.printf("target   %s:%d  (%s)%n", opt.host, opt.port, opt.dryRun ? "dry run" : "sending");
-        System.out.printf("protocol frame = 2-byte big-endian length + UTF-8 JSON, frame < %d B, payload <= %d B%n%n",
+        System.out.printf("protocol frame = 2-byte big-endian length + UTF-8 JSON, frame < %d B, payload <= %d B%n",
                 MAX_FRAME_BYTES, MAX_PAYLOAD);
+        System.out.printf("auth     AUTH handshake first; records are sent only after AUTH_OK%n%n");
 
         long wireBytes = 0;
         int frameCount = 0;
         try (Socket socket = opt.dryRun ? null : connect(opt)) {
             OutputStream out = socket == null ? null : socket.getOutputStream();
 
+            // every connection authenticates once, before the first record
+            byte[] auth = authFrame(opt.token);
+            wireBytes += 2L + auth.length;
+            frameCount++;
+            System.out.printf("[auth] handshake  wire=%d B  head=%s%n", 2 + auth.length, hex(auth, 16));
+            if (out != null) {
+                writeFrame(out, auth);
+                out.flush();
+                // nothing else goes out until the gateway accepts the key: no reply, no records
+                byte[] reply = awaitAuthReply(socket.getInputStream());
+                System.out.printf("[auth] %s  reply=%d B%n", requireAuthOk(reply), 2 + reply.length);
+            }
+            System.out.println();
+
             int index = 1;
             for (IngestRecord entry : records) {
-                byte[] record = entry.toJson(opt.token).getBytes(StandardCharsets.UTF_8);
+                byte[] record = entry.toJson().getBytes(StandardCharsets.UTF_8);
                 // fixed 16 hex chars: the envelope size must not depend on the type name
                 String msgId = nextMsgId();
                 List<byte[]> frames = frames(record, msgId, opt.chunk);
@@ -164,8 +201,8 @@ public final class TcpSampleSender {
     /**
      * Splits one JSON record into frame payloads.
      *
-     * <p>A record that fits {@link #MAX_PAYLOAD} goes out as-is, which keeps the legacy
-     * single-frame format. Otherwise every slice becomes a fragment envelope; {@code data} holds
+     * <p>A record that fits {@link #MAX_PAYLOAD} goes out as-is, which keeps the single-frame
+     * format (no envelope). Otherwise every slice becomes a fragment envelope; {@code data} holds
      * the slice as escaped JSON text, {@code seq} is 1-based, {@code seq == total} marks the end.
      *
      * <p>{@code chunk} is a target, not a promise. Each slice is cut so that its escaped envelope
@@ -320,10 +357,107 @@ public final class TcpSampleSender {
         out.write(payload);
     }
 
+    /**
+     * Handshake payload: the first frame on every connection. The gateway consumes it (no Kafka
+     * record, no eventId) and answers AUTH_OK before any later frame is trusted.
+     * Package-private so {@code TcpSampleSenderTest} can guard the shape.
+     */
+    static byte[] authFrame(String token) {
+        return ("{\"type\":\"AUTH\",\"token\":\"" + escapeJson(token) + "\"}")
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    /** One length-prefixed frame from the gateway; the handshake reply uses the client's framing. */
+    static byte[] readFrame(InputStream in) throws IOException {
+        int hi = in.read();
+        int lo = hi < 0 ? -1 : in.read();
+        if (hi < 0 || lo < 0) {
+            throw new IllegalStateException("gateway closed the connection without answering AUTH");
+        }
+        int length = (hi << 8) | lo;
+        byte[] payload = in.readNBytes(length);
+        if (payload.length != length) {
+            throw new IllegalStateException("handshake reply truncated: "
+                    + payload.length + "/" + length + " B");
+        }
+        return payload;
+    }
+
+    /**
+     * Waits for the handshake reply, naming the one timing failure that is not a connection
+     * failure: the port accepted the TCP connection but no reply arrived in time.
+     */
+    static byte[] awaitAuthReply(InputStream in) throws IOException {
+        try {
+            return readFrame(in);
+        } catch (SocketTimeoutException e) {
+            throw new HandshakeTimeoutException("no AUTH_OK/AUTH_FAIL within " + AUTH_REPLY_TIMEOUT_MS
+                    + " ms (port open, gateway silent) - no records sent");
+        }
+    }
+
+    /** The gateway accepted the TCP connection but never answered the handshake. */
+    static final class HandshakeTimeoutException extends IOException {
+        HandshakeTimeoutException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Validates the gateway's answer. Returns the type on AUTH_OK; throws on AUTH_FAIL (with the
+     * server's reason) so caller aborts before a single record is written.
+     */
+    static String requireAuthOk(byte[] reply) {
+        String json = new String(reply, StandardCharsets.UTF_8);
+        String type = stringField(json, "type");
+        if (AUTH_OK.equals(type)) {
+            return type;
+        }
+        if (AUTH_FAIL.equals(type)) {
+            String reason = stringField(json, "reason");
+            throw new IllegalStateException("gateway rejected AUTH"
+                    + (reason == null ? "" : ": " + reason) + " - no records sent");
+        }
+        throw new IllegalStateException("unexpected AUTH reply: " + json);
+    }
+
+    /**
+     * Value of a flat JSON string field, enough for the two reply shapes this tool expects.
+     * Deliberately tiny: the tool runs as a single source file with no dependencies.
+     */
+    static String stringField(String json, String name) {
+        String needle = "\"" + name + "\":\"";
+        int start = json.indexOf(needle);
+        if (start < 0) {
+            return null;
+        }
+        StringBuilder value = new StringBuilder();
+        for (int i = start + needle.length(); i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (c == '"') {
+                return value.toString();
+            }
+            if (c == '\\' && i + 1 < json.length()) {
+                char escaped = json.charAt(++i);
+                value.append(switch (escaped) {
+                    case 'n' -> '\n';
+                    case 'r' -> '\r';
+                    case 't' -> '\t';
+                    default -> escaped;
+                });
+            } else {
+                value.append(c);
+            }
+        }
+        return null;
+    }
+
     private static Socket connect(Options opt) throws IOException {
         Socket socket = new Socket();
         socket.connect(new InetSocketAddress(opt.host, opt.port), 3000);
         socket.setTcpNoDelay(true);
+        // the handshake is the one place the gateway answers: bound the wait for AUTH_OK/AUTH_FAIL
+        socket.setSoTimeout(AUTH_REPLY_TIMEOUT_MS);
         return socket;
     }
 
@@ -407,7 +541,8 @@ public final class TcpSampleSender {
 
                       --host HOST      gateway TCP host    (env GATEWAY_TCP_HOST, default 127.0.0.1)
                       --port PORT      gateway TCP port    (env GATEWAY_TCP_PORT, default 9100)
-                      --token KEY      gateway API key     (env GATEWAY_API_KEY, default change-me-local-only)
+                      --token KEY      gateway API key, sent in the AUTH handshake
+                                       (env GATEWAY_API_KEY, default change-me-local-only)
                       --chunk BYTES    target raw bytes per slice (default 740; slices shrink to fit)
                       --data-dir DIR   sample directory    (default src/test/resources/tcp)
                       --dry-run        print frames only, open no socket
@@ -415,6 +550,8 @@ public final class TcpSampleSender {
 
                     Run it from the project root so the default sample directory resolves.
                     Both "--token KEY" and "--token=KEY" are accepted.
+                    Records go out only after the gateway answers AUTH_OK (4.5 s wait);
+                    AUTH_FAIL ends the run.
                     """);
         }
     }
@@ -432,17 +569,16 @@ public final class TcpSampleSender {
  * file rather than a nested one so an HTTP or MQTT sender can reuse it as-is: {@code java
  * TcpSampleSender.java} only compiles the file it is given, and a second file would break that.
  *
- * <p>The envelope is exactly four fields:
+ * <p>The envelope is exactly three fields:
  *
  * <ul>
  *   <li>{@code type} — selects the payload validator on the gateway side</li>
- *   <li>{@code token} — the credential; the gateway strips it before the event reaches Kafka</li>
  *   <li>{@code idempotencyKey} — lets the downstream drop a resend</li>
  *   <li>{@code payload} — the analyser's own JSON, forwarded untouched</li>
  * </ul>
  *
- * <p>{@code token} is a {@link #toJson(String)} argument rather than a field, so the same record
- * can be replayed after a key rotation without touching the sample data.
+ * <p>The credential is not part of the record: the connection authenticated with an AUTH frame
+ * before the first record, so a key rotation never touches the sample data.
  *
  * <p>{@code deviceId}, {@code siteId} and {@code occurredAt} stay out on purpose: the gateway
  * derives identity from the connection, forwards site as null and defaults the timestamp.
@@ -454,9 +590,8 @@ public final class TcpSampleSender {
  */
 record IngestRecord(String label, String type, String idempotencyKey, String payload) {
 
-    String toJson(String token) {
+    String toJson() {
         return "{\"type\":\"" + type + "\""
-                + ",\"token\":\"" + token + "\""
                 + ",\"idempotencyKey\":\"" + idempotencyKey + "\""
                 + ",\"payload\":" + payload + "}";
     }
