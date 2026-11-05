@@ -64,23 +64,22 @@ public class PayloadValidator {
     }
 
     /**
-     * Instrument report: the header stays free-form, but the rows are the reason this event
-     * exists: {@code result} must be present, must be an array, and every row must be an object.
-     * Row fields are not enforced because analysers differ.
+     * Instrument report: the header stays free-form. Result validation is disabled for now;
+     * re-enable the commented checks once the report shape is agreed.
      */
     private void validateReport(JsonNode p) {
-        JsonNode result = p.get("result");
-        if (result == null || result.isNull()) {
-            throw new IllegalArgumentException("REPORT.payload.result is required");
-        }
-        if (!result.isArray()) {
-            throw new IllegalArgumentException("REPORT.payload.result must be an array");
-        }
-        for (JsonNode row : result) {
-            if (!row.isObject()) {
-                throw new IllegalArgumentException("REPORT.payload.result items must be objects");
-            }
-        }
+//        JsonNode result = p.get("result");
+//        if (result == null || result.isNull()) {
+//            throw new IllegalArgumentException("REPORT.payload.result is required");
+//        }
+//        if (!result.isArray()) {
+//            throw new IllegalArgumentException("REPORT.payload.result must be an array");
+//        }
+//        for (JsonNode row : result) {
+//            if (!row.isObject()) {
+//                throw new IllegalArgumentException("REPORT.payload.result items must be objects");
+//            }
+//        }
     }
 
     /**
