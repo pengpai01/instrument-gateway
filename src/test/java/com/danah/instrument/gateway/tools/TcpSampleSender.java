@@ -143,14 +143,7 @@ public final class TcpSampleSender {
             byte[] auth = authFrame(opt.token);
             wireBytes += 2L + auth.length;
             frameCount++;
-            System.out.printf("[auth] handshake  wire=%d B  head=%s%n", 2 + auth.length, hex(auth, 16));
-            if (out != null) {
-                writeFrame(out, auth);
-                out.flush();
-                // nothing else goes out until the gateway accepts the key: no reply, no records
-                byte[] reply = awaitAuthReply(socket.getInputStream());
-                System.out.printf("[auth] %s  reply=%d B%n", requireAuthOk(reply), 2 + reply.length);
-            }
+            handshake(socket, auth);
             System.out.println();
 
             int index = 1;
@@ -196,6 +189,30 @@ public final class TcpSampleSender {
         if (!opt.dryRun) {
             System.out.println("no ACK in this protocol: check the gateway log and the Kafka consumer");
         }
+    }
+
+    /**
+     * Sends the AUTH frame and validates the gateway's answer. Nothing is returned: success is the
+     * normal return, and every failure (AUTH_FAIL, a silent gateway, a connection closed without
+     * an answer) throws, so the record loop below is only reachable with an accepted key.
+     *
+     * @throws HandshakeTimeoutException the port answered but no reply arrived in time
+     * @throws IllegalStateException     AUTH_FAIL, an unexpected reply, or a closed connection
+     */
+    private static void handshake(Socket socket, byte[] auth) throws IOException {
+        System.out.printf("[auth] handshake  wire=%d B  head=%s%n", 2 + auth.length, hex(auth, 16));
+        if (socket == null) {
+            return; // dry run: nothing is connected, the frame is only printed
+        }
+
+        OutputStream out = socket.getOutputStream();
+        writeFrame(out, auth);
+        out.flush();
+
+        // the answer decides whether anything else may be written: validate it first, report second
+        byte[] reply = awaitAuthReply(socket.getInputStream());
+        String replyType = requireAuthOk(reply);
+        System.out.printf("[auth] %s  reply=%d B%n", replyType, 2 + reply.length);
     }
 
     /**
@@ -488,6 +505,7 @@ public final class TcpSampleSender {
         String host = env("GATEWAY_TCP_HOST", "127.0.0.1");
         int port = Integer.parseInt(env("GATEWAY_TCP_PORT", "9100"));
         String token = env("GATEWAY_API_KEY", "change-me-local-only");
+        // String token = "abc";
         int chunk = DEFAULT_CHUNK;
         String dataDir = "src/test/resources/tcp";
         boolean dryRun;

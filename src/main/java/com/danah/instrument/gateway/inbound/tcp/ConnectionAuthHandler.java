@@ -104,8 +104,9 @@ public class ConnectionAuthHandler extends SimpleChannelInboundHandler<ByteBuf> 
             return;
         }
 
-        TcpAuthState.authenticated(ctx.channel(), new TcpAuthPrincipal(
-                authenticator.clientIdOf(token), TcpInboundHandler.remoteHost(ctx.channel()), Instant.now()));
+        TcpAuthPrincipal session = new TcpAuthPrincipal(
+                authenticator.clientIdOf(token), TcpInboundHandler.remoteHost(ctx.channel()), Instant.now());
+        TcpAuthState.authenticated(ctx.channel(), session);
         // the client sends its records only after this reply: the handshake is the one place with
         // an answer, so a bad key fails before a single record is put on the wire. A write that
         // never lands still leaves a valid session, so it is warned about rather than ignored
@@ -116,8 +117,10 @@ public class ConnectionAuthHandler extends SimpleChannelInboundHandler<ByteBuf> 
             }
         });
         dropHandshakeTimeout(ctx);
+        // log the object just stored rather than reading it back: a null clientId here means the
+        // shared key was used, not that the session is missing
         log.info("TCP connection authenticated from {} clientId={}",
-                ctx.channel().remoteAddress(), TcpAuthState.principal(ctx.channel()).clientId());
+                ctx.channel().remoteAddress(), session.clientId());
         // the AUTH frame is consumed here: it carries no business payload and must not reach ingest
     }
 
